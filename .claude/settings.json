@@ -1,0 +1,6 @@
+{
+  "shellAllow": [
+    "pip install prompt_toolkit",
+    "pip install questionary"
+  ]
+}

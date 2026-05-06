@@ -1,17 +1,87 @@
-import os
+import json
+import subprocess
+import sys
 from pathlib import Path
 
-MODELS_DIR = Path(r"C:\Users\PC\.lmstudio\models")
+import questionary
 
-BASE_FLAGS = (
-    '--jinja -ngl 99 -c 256000 -fa on '
-    '--cache-type-k turbo3 --cache-type-v turbo3 '
-    '-np 1 --metrics --host 0.0.0.0 --port 1234'
-)
+MODELS_DIR  = Path(r"C:\Users\PC\.lmstudio\models")
+LLAMA_SERVER = Path(r"C:\Projetos\llama-cpp-turboquant\build\bin\Release\llama-server.exe")
+LLAMA_CLI    = Path(r"C:\Projetos\llama-cpp-turboquant\build\bin\Release\llama-cli.exe")
 
+# i5-14600KF: 6P + 8E = 14 núcleos físicos, 20 threads lógicos
+CPU_THREADS_GEN   = 14
+CPU_THREADS_BATCH = 20
+
+THINKING_KEYWORDS = {"qwen3", "qwq", "deepseek-r1", "thinking"}
+
+# ─── choices ──────────────────────────────────────────────────────────────────
+
+MODE_CHOICES = [
+    questionary.Choice("llama-server  — API HTTP (OpenAI-compatible, Claude Code, etc.)",  value="server"),
+    questionary.Choice("llama-cli     — Chat interativo no terminal",                      value="cli"),
+]
+
+KV_CACHE_CHOICES = [
+    questionary.Choice("f16    — padrão, sem compressão",                                 value="f16"),
+    questionary.Choice("turbo3 — ~3-bit KV, alta compressão  (ótimo para ctx longo)",    value="turbo3"),
+    questionary.Choice("turbo4 — ~4-bit KV, mais qualidade que turbo3  [recomendado]",   value="turbo4"),
+    questionary.Choice("q8_0   — leve, quase sem perda de qualidade",                    value="q8_0"),
+    questionary.Choice("q5_0   — compressão moderada",                                   value="q5_0"),
+    questionary.Choice("q4_0   — compressão alta, economiza mais VRAM",                  value="q4_0"),
+]
+
+CONTEXT_CHOICES = [
+    questionary.Choice("  4 096  tokens",                 value=4_096),
+    questionary.Choice("  8 192  tokens",                 value=8_192),
+    questionary.Choice(" 16 384  tokens",                 value=16_384),
+    questionary.Choice(" 32 768  tokens",                 value=32_768),
+    questionary.Choice(" 65 536  tokens  [recomendado]",  value=65_536),
+    questionary.Choice("131 072  tokens",                 value=131_072),
+    questionary.Choice("262 144  tokens  (256k)",         value=262_144),
+    questionary.Choice("Digitar valor customizado...",     value=0),
+]
+
+REASONING_BUDGET_CHOICES = [
+    questionary.Choice("    0  — Desabilitar thinking  (/no_think)", value=0),
+    questionary.Choice(" 1024  — Rápido",                            value=1_024),
+    questionary.Choice(" 2048",                                       value=2_048),
+    questionary.Choice(" 4096  [recomendado — agentes de código]",   value=4_096),
+    questionary.Choice(" 8192  — Problemas complexos",               value=8_192),
+    questionary.Choice("16384  — Máxima qualidade de raciocínio",    value=16_384),
+    questionary.Choice("   -1  — Sem limite",                        value=-1),
+]
+
+PARALLEL_CHOICES = [
+    questionary.Choice("1  [recomendado para ctx longo]",  value=1),
+    questionary.Choice("2  — 2 requisições simultâneas",   value=2),
+    questionary.Choice("4  — 4 requisições simultâneas",   value=4),
+]
+
+MAX_TOKENS_CHOICES = [
+    questionary.Choice("   -1  — Ilimitado  [default]", value=-1),
+    questionary.Choice(" 2048",                          value=2_048),
+    questionary.Choice(" 4096",                          value=4_096),
+    questionary.Choice(" 8192",                          value=8_192),
+    questionary.Choice("16384",                          value=16_384),
+]
+
+BATCH_CHOICES = [
+    questionary.Choice(" 512",                                   value=512),
+    questionary.Choice("1024",                                   value=1_024),
+    questionary.Choice("2048  [default]",                        value=2_048),
+    questionary.Choice("4096  — máximo throughput de prefill",   value=4_096),
+]
+
+UBATCH_CHOICES = [
+    questionary.Choice("128  — menor pico de VRAM no prefill",  value=128),
+    questionary.Choice("256",                                    value=256),
+    questionary.Choice("512  [default]",                         value=512),
+]
+
+# ─── helpers ──────────────────────────────────────────────────────────────────
 
 def find_mmproj(folder: Path) -> Path | None:
-    """Retorna o primeiro mmproj encontrado na mesma pasta, ou None."""
     for f in folder.iterdir():
         if f.is_file() and 'mmproj' in f.name.lower() and f.suffix == '.gguf':
             return f
@@ -19,31 +89,14 @@ def find_mmproj(folder: Path) -> Path | None:
 
 
 def make_alias(model_path: Path) -> str:
-    """Gera alias a partir do nome do arquivo sem extensão."""
     return model_path.stem
 
 
-def make_command(model_path: Path) -> str:
-    alias = make_alias(model_path)
-    mmproj = find_mmproj(model_path.parent)
-
-    label = f'{alias} | Image' if mmproj else alias
-    cmd = f'# {label}\n'
-    cmd += f'llama-server -m "{model_path}"'
-
-    if mmproj:
-        cmd += f' --mmproj "{mmproj}"'
-
-    cmd += f' --alias "{alias}" {BASE_FLAGS}'
-    return cmd
-
-
-def main():
+def collect_models() -> list[Path]:
     if not MODELS_DIR.exists():
         print(f"Pasta não encontrada: {MODELS_DIR}")
-        return
+        sys.exit(1)
 
-    # Coleta todos os .gguf que NÃO são mmproj
     models = sorted([
         f for f in MODELS_DIR.rglob("*.gguf")
         if 'mmproj' not in f.name.lower()
@@ -51,19 +104,415 @@ def main():
 
     if not models:
         print("Nenhum modelo .gguf encontrado.")
+        sys.exit(1)
+
+    return models
+
+
+def is_thinking_model(model_path: Path) -> bool:
+    name = model_path.name.lower()
+    return any(kw in name for kw in THINKING_KEYWORDS)
+
+
+def ask_int(prompt: str, default: int) -> int:
+    val = questionary.text(f"{prompt} (default {default}):").ask().strip()
+    return int(val) if val else default
+
+
+def _read_gguf_template(model_path: Path) -> str | None:
+    import struct
+    try:
+        with open(model_path, 'rb') as f:
+            if f.read(4) != b'GGUF':
+                return None
+            f.read(4)   # version
+            f.read(8)   # tensor_count
+            kv_count = struct.unpack('<Q', f.read(8))[0]
+
+            def skip_value(vtype: int) -> None:
+                fixed = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+                if vtype in fixed:
+                    f.read(fixed[vtype])
+                elif vtype == 8:
+                    f.read(struct.unpack('<Q', f.read(8))[0])
+                elif vtype == 9:
+                    et = struct.unpack('<I', f.read(4))[0]
+                    for _ in range(struct.unpack('<Q', f.read(8))[0]):
+                        skip_value(et)
+                else:
+                    raise ValueError(f"unknown GGUF type {vtype}")
+
+            for _ in range(kv_count):
+                key_len = struct.unpack('<Q', f.read(8))[0]
+                key = f.read(key_len).decode('utf-8')
+                vtype = struct.unpack('<I', f.read(4))[0]
+                if key == 'tokenizer.chat_template':
+                    str_len = struct.unpack('<Q', f.read(8))[0]
+                    return f.read(str_len).decode('utf-8')
+                skip_value(vtype)
+    except Exception:
+        return None
+    return None
+
+
+_FALLBACK_TEMPLATE = (
+    "{{% set default_system = {system} %}}\n"
+    "{{% set ns = namespace(found_system=false) %}}\n"
+    "{{% for message in messages %}}\n"
+    "    {{% if message['role'] == 'system' %}}{{% set ns.found_system = true %}}{{% endif %}}\n"
+    "{{% endfor %}}\n"
+    "{{% if not ns.found_system %}}<|im_start|>system\n"
+    "{{{{ default_system }}}}<|im_end|>\n"
+    "{{% endif %}}\n"
+    "{{% for message in messages %}}<|im_start|>{{{{ message['role'] }}}}\n"
+    "{{{{ message['content'] }}}}<|im_end|>\n"
+    "{{% endfor %}}\n"
+    "{{% if add_generation_prompt %}}<|im_start|>assistant\n"
+    "{{% endif %}}\n"
+)
+
+_KNOWN_DEFAULTS = [
+    "You are Qwen, made by Alibaba Cloud. You are a helpful assistant.",
+    "You are a helpful assistant.",
+]
+
+
+def generate_chat_template(system_file: Path, model_path: Path) -> Path:
+    system_prompt = system_file.read_text(encoding="utf-8").strip()
+    jinja_file = system_file.with_suffix(".jinja")
+
+    native = _read_gguf_template(model_path)
+    if native:
+        template = native
+        for default in _KNOWN_DEFAULTS:
+            if default in native:
+                template = native.replace(default, system_prompt, 1)
+                break
+    else:
+        template = _FALLBACK_TEMPLATE.format(system=json.dumps(system_prompt, ensure_ascii=False))
+
+    jinja_file.write_text(template, encoding="utf-8")
+    return jinja_file
+
+
+def ask_context_window() -> int:
+    selected = questionary.select(
+        "📏 Janela de contexto:",
+        choices=CONTEXT_CHOICES,
+    ).ask()
+    if selected == 0:
+        return ask_int("   Valor customizado", 65_536)
+    return selected
+
+# ─── command builder ──────────────────────────────────────────────────────────
+
+def build_command(
+    model_path:       Path,
+    context_window:   int,
+    kv_cache:         str,
+    flash_attn:       bool,
+    gpu_layers:       int,
+    parallel_slots:   int,
+    batch_size:       int,
+    ubatch_size:      int,
+    threads_gen:      int,
+    threads_batch:    int,
+    reasoning_budget: int | None,
+    mlock:            bool,
+    max_tokens:       int,
+    mmproj:           Path | None = None,
+    system_file:      Path | None = None,
+) -> str:
+    alias = make_alias(model_path)
+
+    if not LLAMA_SERVER.exists():
+        print(f"❌ llama-server não encontrado em: {LLAMA_SERVER}")
+        print("   Compile o turboquant ou ajuste o caminho em LLAMA_SERVER.")
+        sys.exit(1)
+
+    cmd = f'"{LLAMA_SERVER}" -m "{model_path}"'
+
+    if mmproj:
+        cmd += f' --mmproj "{mmproj}"'
+
+    cmd += f' --alias "{alias}"'
+    cmd += f' -c {context_window}'
+    cmd += f' -ngl {gpu_layers}'
+    cmd += f' --cache-type-k {kv_cache} --cache-type-v {kv_cache}'
+    cmd += ' -fa on' if flash_attn else ' -fa off'
+    cmd += f' -b {batch_size} -ub {ubatch_size}'
+    cmd += f' -t {threads_gen} -tb {threads_batch}'
+    cmd += f' -np {parallel_slots}'
+    cmd += f' -n {max_tokens}'
+
+    if reasoning_budget is not None:
+        cmd += f' --reasoning-budget {reasoning_budget}'
+
+    if mlock:
+        cmd += ' --mlock'
+
+    if system_file:
+        jinja_path = generate_chat_template(system_file, model_path)
+        cmd += f' --chat-template-file "{jinja_path}"'
+
+    cmd += ' --defrag-thold 0.1'
+    cmd += ' --jinja --metrics --host 0.0.0.0 --port 1234'
+
+    return cmd
+
+def build_cli_command(
+    model_path:       Path,
+    context_window:   int,
+    kv_cache:         str,
+    flash_attn:       bool,
+    gpu_layers:       int,
+    batch_size:       int,
+    ubatch_size:      int,
+    threads_gen:      int,
+    threads_batch:    int,
+    reasoning_budget: int | None,
+    mlock:            bool,
+    max_tokens:       int,
+    mmproj:           Path | None = None,
+    system_file:      Path | None = None,
+) -> str:
+    if not LLAMA_CLI.exists():
+        print(f"❌ llama-cli não encontrado em: {LLAMA_CLI}")
+        print("   Compile o turboquant ou ajuste o caminho em LLAMA_CLI.")
+        sys.exit(1)
+
+    cmd = f'"{LLAMA_CLI}" -m "{model_path}"'
+
+    if mmproj:
+        cmd += f' --mmproj "{mmproj}"'
+
+    cmd += f' -c {context_window}'
+    cmd += f' -ngl {gpu_layers}'
+    cmd += f' --cache-type-k {kv_cache} --cache-type-v {kv_cache}'
+    cmd += ' -fa on' if flash_attn else ' -fa off'
+    cmd += f' -b {batch_size} -ub {ubatch_size}'
+    cmd += f' -t {threads_gen} -tb {threads_batch}'
+    cmd += f' -n {max_tokens}'
+
+    if reasoning_budget is not None:
+        cmd += f' --reasoning-budget {reasoning_budget}'
+
+    if mlock:
+        cmd += ' --mlock'
+
+    if system_file:
+        jinja_path = generate_chat_template(system_file, model_path)
+        cmd += f' --chat-template-file "{jinja_path}"'
+
+    cmd += ' --conversation'
+
+    return cmd
+
+# ─── main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    models = collect_models()
+
+    labels = []
+    for m in models:
+        alias  = make_alias(m)
+        mmproj = find_mmproj(m.parent)
+        tag    = " | 🖼️ Image" if mmproj else ""
+        rel    = m.relative_to(MODELS_DIR).as_posix()
+        labels.append(f"{alias}{tag}  ({rel})")
+
+    print(f"\n📋 {len(models)} modelo(s) encontrado(s) em {MODELS_DIR}\n")
+
+    mode: str = questionary.select(
+        "⚙️  Modo de execução:",
+        choices=MODE_CHOICES,
+    ).ask()
+
+    if not mode:
         return
 
-    print(f"# {len(models)} modelo(s) encontrado(s) em {MODELS_DIR}\n")
+    print()
 
-    commands = [make_command(m) for m in models]
-    output = "\n\n\n".join(commands)  # 2 linhas em branco entre comandos
+    selected_label = questionary.select(
+        "➡️  Selecione um modelo:",
+        choices=labels,
+    ).ask()
 
-    print(output)
+    if not selected_label:
+        print("Nenhum modelo selecionado.")
+        return
 
-    # Salva também em arquivo .txt ao lado do script
-    out_file = Path(__file__).parent / "comandos_llama.txt"
-    out_file.write_text(output, encoding="utf-8")
-    print(f"\n\n# Comandos salvos em: {out_file}")
+    model_path = next(
+        (models[i] for i, label in enumerate(labels) if label == selected_label),
+        None,
+    )
+
+    if model_path is None:
+        print("Modelo não encontrado.")
+        return
+
+    print()
+
+    # mmproj
+    mmproj     = find_mmproj(model_path.parent)
+    use_mmproj: Path | None = None
+    if mmproj:
+        if questionary.confirm("🖼️  Habilitar suporte a imagem (--mmproj)?", default=True).ask():
+            use_mmproj = mmproj
+
+    # ── seção 1: contexto e memória ──────────────────────────────────────────
+    context_window = ask_context_window()
+
+    kv_cache = questionary.select(
+        "🗜️  Cache KV (K e V):",
+        choices=KV_CACHE_CHOICES,
+    ).ask()
+
+    flash_attn = questionary.confirm("⚡ Flash Attention (-fa)?", default=True).ask()
+    gpu_layers = ask_int("🎮 Camadas na GPU (-ngl)", 99)
+
+    print()
+
+    # ── seção 2: paralelismo e slots (apenas server) ─────────────────────────
+    parallel_slots: int = 1
+    if mode == "server":
+        parallel_slots = questionary.select(
+            "🔀 Slots paralelos (-np):",
+            choices=PARALLEL_CHOICES,
+        ).ask()
+
+        kv_total = context_window * parallel_slots
+        if kv_total > 131_072:
+            print(f"   ⚠️  {context_window:,} ctx × {parallel_slots} slots = {kv_total:,} tokens no KV cache — verifique VRAM disponível.")
+
+    # ── seção 3: reasoning (apenas modelos thinking) ─────────────────────────
+    reasoning_budget: int | None = None
+    if is_thinking_model(model_path):
+        print()
+        reasoning_budget = questionary.select(
+            "🧠 Reasoning budget (--reasoning-budget):",
+            choices=REASONING_BUDGET_CHOICES,
+        ).ask()
+
+    print()
+
+    # ── seção 4: otimizações de geração ──────────────────────────────────────
+    mlock = questionary.confirm(
+        "🔒 Travar modelo na RAM? (--mlock)",
+        default=True,
+    ).ask()
+
+    max_tokens: int = questionary.select(
+        "📤 Máx tokens por resposta (-n):",
+        choices=MAX_TOKENS_CHOICES,
+    ).ask()
+
+    print()
+
+    # ── seção 5: avançado (batch / threads) ──────────────────────────────────
+    if questionary.confirm("⚙️  Configurar batch/threads avançado?", default=False).ask():
+        print()
+        batch_size: int = questionary.select(
+            "   Batch size físico (-b):",
+            choices=BATCH_CHOICES,
+        ).ask()
+        ubatch_size: int = questionary.select(
+            "   Micro-batch size (-ub):",
+            choices=UBATCH_CHOICES,
+        ).ask()
+        threads_gen   = ask_int("   Threads geração (-t)", CPU_THREADS_GEN)
+        threads_batch = ask_int("   Threads batch   (-tb)", CPU_THREADS_BATCH)
+    else:
+        batch_size    = 2_048
+        ubatch_size   = 512
+        threads_gen   = CPU_THREADS_GEN
+        threads_batch = CPU_THREADS_BATCH
+
+    print()
+
+    # ── system prompt (arquivo .md) ──────────────────────────────────────────
+    script_dir = Path(__file__).resolve().parent
+    default_system = script_dir / "system_prompt.md"
+    system_file: Path | None = None
+
+    if default_system.exists():
+        if questionary.confirm(f"📜 Arquivo system prompt encontrado ({default_system.name}). Usar?", default=True).ask():
+            system_file = default_system
+    else:
+        if questionary.confirm("📜 Deseja usar um arquivo system prompt (.md)?", default=False).ask():
+            path = questionary.path("   Caminho do arquivo .md:", default="system_prompt.md").ask()
+            p = Path(path)
+            if p.exists():
+                system_file = p
+            else:
+                print(f"   ⚠️  Arquivo não encontrado: {p}")
+
+    print()
+
+    # ── build e execução ─────────────────────────────────────────────────────
+    if mode == "server":
+        cmd = build_command(
+            model_path=model_path,
+            context_window=context_window,
+            kv_cache=kv_cache,
+            flash_attn=flash_attn,
+            gpu_layers=gpu_layers,
+            parallel_slots=parallel_slots,
+            batch_size=batch_size,
+            ubatch_size=ubatch_size,
+            threads_gen=threads_gen,
+            threads_batch=threads_batch,
+            reasoning_budget=reasoning_budget,
+            mlock=mlock,
+            max_tokens=max_tokens,
+            mmproj=use_mmproj,
+            system_file=system_file,
+        )
+    else:
+        cmd = build_cli_command(
+            model_path=model_path,
+            context_window=context_window,
+            kv_cache=kv_cache,
+            flash_attn=flash_attn,
+            gpu_layers=gpu_layers,
+            batch_size=batch_size,
+            ubatch_size=ubatch_size,
+            threads_gen=threads_gen,
+            threads_batch=threads_batch,
+            reasoning_budget=reasoning_budget,
+            mlock=mlock,
+            max_tokens=max_tokens,
+            mmproj=use_mmproj,
+            system_file=system_file,
+        )
+    alias      = make_alias(model_path)
+    mode_label = "llama-server" if mode == "server" else "llama-cli"
+
+    img_status    = f"mmproj: {use_mmproj.name}" if use_mmproj else "mmproj: off"
+    budget_status = f"budget: {reasoning_budget}" if reasoning_budget is not None else None
+    sys_status    = f"system: {system_file.name}" if system_file else "system: off"
+
+    print(f"🚀 Iniciando [{mode_label}]: {alias}")
+    print(f"   ctx: {context_window:,}  |  kv: {kv_cache}  |  fa: {flash_attn}  |  ngl: {gpu_layers}")
+    if mode == "server":
+        print(f"   np: {parallel_slots}  |  b: {batch_size}  |  ub: {ubatch_size}  |  t: {threads_gen}/{threads_batch}  |  mlock: {mlock}")
+    else:
+        print(f"   b: {batch_size}  |  ub: {ubatch_size}  |  t: {threads_gen}/{threads_batch}  |  mlock: {mlock}")
+    if budget_status:
+        print(f"   {budget_status}  |  n: {max_tokens}  |  {img_status}  |  {sys_status}")
+    else:
+        print(f"   n: {max_tokens}  |  {img_status}  |  {sys_status}")
+    print()
+    print(f"   {cmd}\n")
+
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+    except KeyboardInterrupt:
+        print("\n\n⛔ Interrompido pelo usuário.")
+    except FileNotFoundError:
+        print(f"❌ {mode_label} não encontrado.")
+    except Exception as e:
+        print(f"❌ Erro ao executar: {e}")
 
 
 if __name__ == "__main__":

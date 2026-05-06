@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git clone *)",
+      "Bash(Get-Content *)",
+      "PowerShell(python -c \"import ast; ast.parse\\(open\\('c:/llm/models.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "PowerShell(cmd /c \"dir C:\\\\Projetos\\\\llama-cpp-turboquant\")",
+      "PowerShell(cmd /c \"dir C:\\\\Projetos\\\\llama-cpp-turboquant\\\\build\\\\bin /b\")",
+      "PowerShell(cmd /c \"dir C:\\\\Projetos\\\\llama-cpp-turboquant\\\\build\\\\bin\\\\Release /b\")",
+      "PowerShell(cmd /c \"dir C:\\\\Projetos\\\\llama-cpp\\\\build\\\\bin\\\\Release /b\" 2>&1)",
+      "PowerShell(cmd /c \"dir C:\\\\Projetos\\\\turboquant_plus /b\" 2>&1)",
+      "PowerShell(cmd /c \"dir C:\\\\Projetos\\\\llama-cpp-turboquant\\\\build\\\\bin\\\\Release\\\\llama-cli.exe\")",
+      "PowerShell(cmd /c \"C:\\\\Projetos\\\\llama-cpp-turboquant\\\\build\\\\bin\\\\Release\\\\llama-cli.exe --help 2>&1\" | Select-Object -First 80)"
+    ]
+  }
+}
