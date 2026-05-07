@@ -1,6 +1,7 @@
 {
   "shellAllow": [
     "pip install prompt_toolkit",
-    "pip install questionary"
+    "pip install questionary",
+    "dir /b /s \"C:\\Projetos\\llama-cpp-turboquant\" | findstr /i \"llama-cpp-turboquant.py\""
   ]
 }

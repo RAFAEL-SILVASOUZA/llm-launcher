@@ -8,6 +8,7 @@ import questionary
 MODELS_DIR  = Path(r"C:\Users\PC\.lmstudio\models")
 LLAMA_SERVER = Path(r"C:\Projetos\llama-cpp-turboquant\build\bin\Release\llama-server.exe")
 LLAMA_CLI    = Path(r"C:\Projetos\llama-cpp-turboquant\build\bin\Release\llama-cli.exe")
+CONFIG_FILE  = Path(r"C:\Projetos\llama-cpp-turboquant\last_config.json")
 
 # i5-14600KF: 6P + 8E = 14 núcleos físicos, 20 threads lógicos
 CPU_THREADS_GEN   = 14
@@ -80,6 +81,42 @@ UBATCH_CHOICES = [
 ]
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
+
+def _read_all_configs() -> list[dict]:
+	"""Lê o array de configurações do JSON (um por modelo)."""
+	try:
+		if CONFIG_FILE.exists():
+			data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+			if isinstance(data, list):
+				return data
+	except Exception:
+		pass
+	return []
+
+
+def save_config(cfg: dict) -> None:
+	"""Salva a config no array, substituindo a existente do mesmo modelo (se houver)."""
+	configs = _read_all_configs()
+	model_key = cfg.get("model", "")
+
+	# Remove config antiga do mesmo modelo, se existir
+	configs = [c for c in configs if c.get("model") != model_key]
+	configs.append(cfg)
+
+	try:
+		CONFIG_FILE.write_text(json.dumps(configs, indent=2, ensure_ascii=False), encoding="utf-8")
+	except Exception:
+		pass
+
+
+def load_config(model_path: Path) -> dict | None:
+	"""Retorna a config salva para o modelo especificado, ou None."""
+	configs = _read_all_configs()
+	for cfg in configs:
+		if cfg.get("model") == str(model_path):
+			return cfg
+	return None
+
 
 def find_mmproj(folder: Path) -> Path | None:
     for f in folder.iterdir():
@@ -353,101 +390,147 @@ def main():
 
     print()
 
-    # mmproj
-    mmproj     = find_mmproj(model_path.parent)
-    use_mmproj: Path | None = None
-    if mmproj:
-        if questionary.confirm("🖼️  Habilitar suporte a imagem (--mmproj)?", default=True).ask():
-            use_mmproj = mmproj
+    # ── config anterior deste modelo? ────────────────────────────────────────
+    prev_cfg = load_config(model_path)
+    use_prev = False
 
-    # ── seção 1: contexto e memória ──────────────────────────────────────────
-    context_window = ask_context_window()
+    if prev_cfg:
+        prev_alias = make_alias(Path(prev_cfg.get("model", "")))
+        ctx = prev_cfg.get('context_window', '?')
+        ctx_str = f"{ctx:,}" if isinstance(ctx, int) else ctx
+        rb = prev_cfg.get('reasoning_budget')
+        rb_str = str(rb) if rb is not None else "—"
 
-    kv_cache = questionary.select(
-        "🗜️  Cache KV (K e V):",
-        choices=KV_CACHE_CHOICES,
-    ).ask()
-
-    flash_attn = questionary.confirm("⚡ Flash Attention (-fa)?", default=True).ask()
-    gpu_layers = ask_int("🎮 Camadas na GPU (-ngl)", 99)
-
-    print()
-
-    # ── seção 2: paralelismo e slots (apenas server) ─────────────────────────
-    parallel_slots: int = 1
-    if mode == "server":
-        parallel_slots = questionary.select(
-            "🔀 Slots paralelos (-np):",
-            choices=PARALLEL_CHOICES,
-        ).ask()
-
-        kv_total = context_window * parallel_slots
-        if kv_total > 131_072:
-            print(f"   ⚠️  {context_window:,} ctx × {parallel_slots} slots = {kv_total:,} tokens no KV cache — verifique VRAM disponível.")
-
-    # ── seção 3: reasoning (apenas modelos thinking) ─────────────────────────
-    reasoning_budget: int | None = None
-    if is_thinking_model(model_path):
+        print("┌─ Configuração salva para este modelo ─────────────────────")
+        print(f"│  Modelo          : {prev_alias}")
+        print(f"│  Contexto        : {ctx_str}")
+        print(f"│  KV Cache        : {prev_cfg.get('kv_cache', '?')}")
+        print(f"│  Flash Attention : {prev_cfg.get('flash_attn', '?')}")
+        print(f"│  GPU Layers      : {prev_cfg.get('gpu_layers', '?')}")
+        print(f"│  Slots paralelos : {prev_cfg.get('parallel_slots', '?')}")
+        print(f"│  MLock           : {prev_cfg.get('mlock', '?')}")
+        print(f"│  Max Tokens      : {prev_cfg.get('max_tokens', '?')}")
+        print(f"│  Reasoning Budget: {rb_str}")
+        print("└───────────────────────────────────────────────────────────")
         print()
-        reasoning_budget = questionary.select(
-            "🧠 Reasoning budget (--reasoning-budget):",
-            choices=REASONING_BUDGET_CHOICES,
+        if questionary.confirm("   Usar a configuração salva?", default=True).ask():
+            use_prev = True
+            context_window   = prev_cfg.get("context_window", 65_536)
+            kv_cache         = prev_cfg.get("kv_cache", "turbo4")
+            flash_attn       = prev_cfg.get("flash_attn", True)
+            gpu_layers       = prev_cfg.get("gpu_layers", 99)
+            parallel_slots   = prev_cfg.get("parallel_slots", 1)
+            reasoning_budget = prev_cfg.get("reasoning_budget")
+            mlock            = prev_cfg.get("mlock", True)
+            max_tokens       = prev_cfg.get("max_tokens", -1)
+            batch_size       = prev_cfg.get("batch_size", 2_048)
+            ubatch_size      = prev_cfg.get("ubatch_size", 512)
+            threads_gen      = prev_cfg.get("threads_gen", CPU_THREADS_GEN)
+            threads_batch    = prev_cfg.get("threads_batch", CPU_THREADS_BATCH)
+            use_mmproj: Path | None = None
+            if prev_cfg.get("mmproj"):
+                p = Path(prev_cfg["mmproj"])
+                use_mmproj = p if p.exists() else None
+
+    if not use_prev:
+        # ── mmproj ───────────────────────────────────────────────────────────
+        mmproj     = find_mmproj(model_path.parent)
+        use_mmproj: Path | None = None
+        if mmproj:
+            if questionary.confirm("🖼️  Habilitar suporte a imagem (--mmproj)?", default=True).ask():
+                use_mmproj = mmproj
+
+        # ── seção 1: contexto e memória ──────────────────────────────────────
+        context_window = ask_context_window()
+
+        kv_cache = questionary.select(
+            "🗜️  Cache KV (K e V):",
+            choices=KV_CACHE_CHOICES,
         ).ask()
 
-    print()
+        flash_attn = questionary.confirm("⚡ Flash Attention (-fa)?", default=True).ask()
+        gpu_layers = ask_int("🎮 Camadas na GPU (-ngl)", 99)
 
-    # ── seção 4: otimizações de geração ──────────────────────────────────────
-    mlock = questionary.confirm(
-        "🔒 Travar modelo na RAM? (--mlock)",
-        default=True,
-    ).ask()
-
-    max_tokens: int = questionary.select(
-        "📤 Máx tokens por resposta (-n):",
-        choices=MAX_TOKENS_CHOICES,
-    ).ask()
-
-    print()
-
-    # ── seção 5: avançado (batch / threads) ──────────────────────────────────
-    if questionary.confirm("⚙️  Configurar batch/threads avançado?", default=False).ask():
         print()
-        batch_size: int = questionary.select(
-            "   Batch size físico (-b):",
-            choices=BATCH_CHOICES,
+
+        # ── seção 2: paralelismo e slots (apenas server) ─────────────────────
+        parallel_slots: int = 1
+        if mode == "server":
+            parallel_slots = questionary.select(
+                "🔀 Slots paralelos (-np):",
+                choices=PARALLEL_CHOICES,
+            ).ask()
+
+            kv_total = context_window * parallel_slots
+            if kv_total > 131_072:
+                print(f"   ⚠️  {context_window:,} ctx × {parallel_slots} slots = {kv_total:,} tokens no KV cache — verifique VRAM disponível.")
+
+        # ── seção 3: reasoning (apenas modelos thinking) ─────────────────────
+        reasoning_budget: int | None = None
+        if is_thinking_model(model_path):
+            print()
+            reasoning_budget = questionary.select(
+                "🧠 Reasoning budget (--reasoning-budget):",
+                choices=REASONING_BUDGET_CHOICES,
+            ).ask()
+
+        print()
+
+        # ── seção 4: otimizações de geração ──────────────────────────────────
+        mlock = questionary.confirm(
+            "🔒 Travar modelo na RAM? (--mlock)",
+            default=False,
         ).ask()
-        ubatch_size: int = questionary.select(
-            "   Micro-batch size (-ub):",
-            choices=UBATCH_CHOICES,
+
+        max_tokens: int = questionary.select(
+            "📤 Máx tokens por resposta (-n):",
+            choices=MAX_TOKENS_CHOICES,
         ).ask()
-        threads_gen   = ask_int("   Threads geração (-t)", CPU_THREADS_GEN)
-        threads_batch = ask_int("   Threads batch   (-tb)", CPU_THREADS_BATCH)
-    else:
-        batch_size    = 2_048
-        ubatch_size   = 512
-        threads_gen   = CPU_THREADS_GEN
-        threads_batch = CPU_THREADS_BATCH
+
+        print()
+
+        # ── seção 5: avançado (batch / threads) ──────────────────────────────
+        if questionary.confirm("⚙️  Configurar batch/threads avançado?", default=False).ask():
+            print()
+            batch_size: int = questionary.select(
+                "   Batch size físico (-b):",
+                choices=BATCH_CHOICES,
+            ).ask()
+            ubatch_size: int = questionary.select(
+                "   Micro-batch size (-ub):",
+                choices=UBATCH_CHOICES,
+            ).ask()
+            threads_gen   = ask_int("   Threads geração (-t)", CPU_THREADS_GEN)
+            threads_batch = ask_int("   Threads batch   (-tb)", CPU_THREADS_BATCH)
+        else:
+            batch_size    = 2_048
+            ubatch_size   = 512
+            threads_gen   = CPU_THREADS_GEN
+            threads_batch = CPU_THREADS_BATCH
+
+    # ── salva configuração ───────────────────────────────────────────────────
+    cfg = {
+        "model":          str(model_path),
+        "context_window": context_window,
+        "kv_cache":       kv_cache,
+        "flash_attn":     flash_attn,
+        "gpu_layers":     gpu_layers,
+        "parallel_slots": parallel_slots,
+        "reasoning_budget": reasoning_budget,
+        "mlock":          mlock,
+        "max_tokens":     max_tokens,
+        "batch_size":     batch_size,
+        "ubatch_size":    ubatch_size,
+        "threads_gen":    threads_gen,
+        "threads_batch":  threads_batch,
+        "mmproj":         str(use_mmproj) if use_mmproj else None,
+    }
+    save_config(cfg)
 
     print()
 
     # ── system prompt (arquivo .md) ──────────────────────────────────────────
-    script_dir = Path(__file__).resolve().parent
-    default_system = script_dir / "system_prompt.md"
     system_file: Path | None = None
-
-    if default_system.exists():
-        if questionary.confirm(f"📜 Arquivo system prompt encontrado ({default_system.name}). Usar?", default=True).ask():
-            system_file = default_system
-    else:
-        if questionary.confirm("📜 Deseja usar um arquivo system prompt (.md)?", default=False).ask():
-            path = questionary.path("   Caminho do arquivo .md:", default="system_prompt.md").ask()
-            p = Path(path)
-            if p.exists():
-                system_file = p
-            else:
-                print(f"   ⚠️  Arquivo não encontrado: {p}")
-
-    print()
 
     # ── build e execução ─────────────────────────────────────────────────────
     if mode == "server":
