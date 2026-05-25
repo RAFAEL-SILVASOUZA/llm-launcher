@@ -38,6 +38,7 @@
   "build": {
     "appId": "com.llm.launcher",
     "productName": "LLM Launcher",
+    "asar": false,
     "win": {
       "target": "portable"
     },
@@ -47,7 +48,9 @@
       "api/**/*",
       "requirements.txt",
       "package.json",
-      "!**/__pycache__"
+      "!**/__pycache__",
+      "!api/api_port.tmp",
+      "!api/api_running.json"
     ]
   }
 }
