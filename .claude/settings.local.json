@@ -54,7 +54,8 @@
       "Bash(npx tsc *)",
       "Bash(echo \"tsc exit=$?\")",
       "Bash(npx vite *)",
-      "Bash(echo \"exit=$?\")"
+      "Bash(echo \"exit=$?\")",
+      "Bash(curl *)"
     ]
   }
 }
