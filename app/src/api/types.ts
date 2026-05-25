@@ -38,6 +38,7 @@ export type SystemInfo = {
   vram_total_mib: number | null;
   vram_free_mib: number | null;
   ram_total_mib: number | null;
+  ram_avail_mib: number | null;
 };
 
 export type ModelInfo = {
@@ -128,6 +129,13 @@ export type Estimate = {
   ram_avail: number | null;
 };
 
+export type ActiveLaunch = {
+  launch_id: string;
+  attached: boolean;
+  pid: number | null;
+  config: LaunchConfig;
+};
+
 export type LaunchEvent =
   | { type: "start"; attempt: number; cmd: string; config: LaunchConfig }
   | { type: "stdout"; line: string }
@@ -138,3 +146,85 @@ export type LaunchEvent =
   | { type: "restart"; attempt: number; backoff: number }
   | { type: "giveup"; reason: string; failure?: string; excerpt?: string; hint?: string }
   | { type: "done"; attempt: number };
+
+// ─── HuggingFace download ──────────────────────────────────────────────────
+
+export type HfFile = {
+  path: string;
+  size: number;
+};
+
+export type HfRepoListing = {
+  repo_id: string;
+  files: HfFile[];
+  mmprojs: HfFile[];
+  quants: Record<string, HfFile[]>;
+};
+
+export type HfSearchResult = {
+  repo_id: string;
+  downloads: number;
+  likes: number;
+};
+
+export type HfDownloadPlan = {
+  repo_id: string;
+  branch: string;
+  base_dir: string;
+  items: {
+    rel: string;
+    dest: string;
+    exists: boolean;
+    size_disk: number;
+    url: string;
+  }[];
+};
+
+export type HfDownloadEvent =
+  | { type: "file_start"; rel: string; dest: string; index: number; total: number }
+  | { type: "progress"; rel: string; downloaded: number; total: number; speed: number }
+  | { type: "file_done"; rel: string; dest: string }
+  | { type: "file_skip"; rel: string; dest: string; reason: string; size: number }
+  | { type: "error"; rel: string; message: string }
+  | { type: "cancelled" }
+  | { type: "done" };
+
+// ─── NVIDIA detalhado ──────────────────────────────────────────────────────
+
+export type NvidiaStatus =
+  | { available: false; error: string }
+  | { available: true; gpus: Record<string, string>[] };
+
+// ─── LM Studio ──────────────────────────────────────────────────────────────
+
+export type LmsStatus = {
+  available: boolean;
+  running: boolean;
+  path: string;
+  raw?: string;
+  error?: string;
+};
+
+export type LmsLoadResult = {
+  ok: boolean;
+  key?: string;
+  alias?: string;
+  start_output?: string;
+  load_output?: string;
+  rc?: number;
+  error?: string;
+};
+
+// ─── delete model ──────────────────────────────────────────────────────────
+
+export type DeletePlan = {
+  files: string[];
+  total_bytes: number;
+  count: number;
+};
+
+export type DeleteResult = {
+  removed: string[];
+  errors: { path: string; error: string }[];
+  total_bytes: number;
+};

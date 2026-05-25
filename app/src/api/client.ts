@@ -6,11 +6,20 @@
 // FastAPI é rodado standalone.
 
 import type {
+  ActiveLaunch,
   BackendStatus,
+  DeletePlan,
+  DeleteResult,
   Estimate,
   GgufMeta,
+  HfDownloadPlan,
+  HfRepoListing,
+  HfSearchResult,
   LaunchConfig,
+  LmsLoadResult,
+  LmsStatus,
   ModelInfo,
+  NvidiaStatus,
   Options,
   SystemInfo,
 } from "./types";
@@ -83,6 +92,22 @@ export const api = {
       body: JSON.stringify({ model, backend: backend ?? null }),
     }),
 
+  estimateMany: (items: {
+    model: string;
+    backend: string;
+    context_window: number;
+    kv_cache: string;
+    parallel_slots: number;
+    gpu_layers: number;
+    n_cpu_moe: number;
+    mmproj: string | null;
+    cache_ram: number;
+    mode: "server" | "cli";
+  }[]) =>
+    jsonFetch<{ ok: boolean; estimate?: Estimate; error?: string; model: string; backend: string }[]>(
+      "/api/estimate-many",
+      { method: "POST", body: JSON.stringify({ items }) },
+    ),
   estimate: (req: {
     model: string;
     backend: string;
@@ -142,9 +167,68 @@ export const api = {
     }),
   cancelLaunch: (id: string) =>
     jsonFetch<{ ok: boolean }>(`/api/launch/${id}/cancel`, { method: "POST" }),
+  listLaunches: () =>
+    jsonFetch<ActiveLaunch[]>("/api/launches"),
+
+  // ─── HuggingFace ─────────────────────────────────────────────────────
+  hfResolve: (url: string) =>
+    jsonFetch<{ repo_id: string; filename: string | null; branch: string }>(
+      "/api/hf/resolve",
+      { method: "POST", body: JSON.stringify({ url }) },
+    ),
+  hfList: (repo_id: string) =>
+    jsonFetch<HfRepoListing>("/api/hf/list", {
+      method: "POST",
+      body: JSON.stringify({ repo_id }),
+    }),
+  hfSearch: (query: string, limit = 25) =>
+    jsonFetch<{ results: HfSearchResult[] }>("/api/hf/search", {
+      method: "POST",
+      body: JSON.stringify({ query, limit }),
+    }),
+  hfDownload: (req: {
+    repo_id: string;
+    branch?: string;
+    rel_paths: string[];
+    subdir?: string | null;
+  }) =>
+    jsonFetch<{ download_id: string; plan: HfDownloadPlan }>("/api/hf/download", {
+      method: "POST",
+      body: JSON.stringify({ branch: "main", subdir: null, ...req }),
+    }),
+  cancelDownload: (id: string) =>
+    jsonFetch<{ ok: boolean }>(`/api/hf/download/${id}/cancel`, { method: "POST" }),
+
+  // ─── delete model ────────────────────────────────────────────────────
+  planDeleteModel: (model: string) =>
+    jsonFetch<DeletePlan>("/api/models/plan-delete", {
+      method: "POST",
+      body: JSON.stringify({ model, confirm: false }),
+    }),
+  deleteModel: (model: string) =>
+    jsonFetch<DeleteResult>("/api/models", {
+      method: "DELETE",
+      body: JSON.stringify({ model, confirm: true }),
+    }),
+
+  // ─── LM Studio ───────────────────────────────────────────────────────
+  lmsStatus: () => jsonFetch<LmsStatus>("/api/lms/status"),
+  lmsLoad: (req: { model: string; context_window: number; parallel_slots: number }) =>
+    jsonFetch<LmsLoadResult>("/api/lms/load", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  // ─── nvidia ──────────────────────────────────────────────────────────
+  nvidia: () => jsonFetch<NvidiaStatus>("/api/nvidia"),
 };
 
 export async function eventsStream(launchId: string): Promise<EventSource> {
   const base = await apiBase();
   return new EventSource(`${base}/api/launch/${launchId}/events`);
+}
+
+export async function downloadEventsStream(downloadId: string): Promise<EventSource> {
+  const base = await apiBase();
+  return new EventSource(`${base}/api/hf/download/${downloadId}/events`);
 }

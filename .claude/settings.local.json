@@ -53,7 +53,8 @@
       "Bash(npm install *)",
       "Bash(npx tsc *)",
       "Bash(echo \"tsc exit=$?\")",
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }
