@@ -27,11 +27,20 @@ export default function App() {
   const [estimates, setEstimates] = useState<Record<string, Estimate>>({});
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState<string | null>(null);
+  const [pythonLogPath, setPythonLogPath] = useState<string | null>(null);
 
   const [tab, setTab] = useState<TabId>("configs");
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorInitial, setEditorInitial] = useState<Partial<LaunchConfig> | null>(null);
+  // "edit" = atualiza no lugar (se mudar a chave model|backend, apaga a antiga);
+  // "duplicate" = vai gerar uma nova entrada (mesmo se a chave mudar, a antiga fica);
+  // "new" = entrada nova do zero.
+  const [editorMode, setEditorMode] = useState<"edit" | "duplicate" | "new">("new");
+  // Snapshot da chave (model, backend) no momento que o editor abriu — usada
+  // pra detectar "rekey" no save quando estamos em modo edit.
+  const [editorOriginalKey, setEditorOriginalKey] =
+    useState<{ model: string; backend: string } | null>(null);
 
   const [launchId, setLaunchId] = useState<string | null>(null);
   const [launchCfg, setLaunchCfg] = useState<LaunchConfig | null>(null);
@@ -102,6 +111,12 @@ export default function App() {
       }
     } catch (err) {
       setError((err as Error).message);
+      // Em prod (Electron empacotado), o backend Python pode não subir —
+      // path do log ajuda o usuário a diagnosticar.
+      try {
+        const p = await window.electronAPI?.getPythonLogPath?.();
+        if (p) setPythonLogPath(p);
+      } catch { /* ignore */ }
     } finally {
       setLoading(false);
     }
@@ -163,20 +178,25 @@ export default function App() {
 
   const handleEdit = (cfg: LaunchConfig) => {
     setEditorInitial(cfg);
+    setEditorMode("edit");
+    setEditorOriginalKey({ model: cfg.model, backend: cfg.backend });
     setEditorOpen(true);
   };
 
   const handleNew = () => {
     setEditorInitial(null);
+    setEditorMode("new");
+    setEditorOriginalKey(null);
     setEditorOpen(true);
   };
 
-  // Duplicar = abrir editor com initial = cfg, mas sem `mode` "edit". Quando
-  // salvar com outro backend (mais comum), save_config cria uma nova entrada
-  // por causa da chave composta (model, backend). Pra duplicar dentro do
-  // mesmo backend o usuário pode trocar qualquer outro knob antes de salvar.
+  // Duplicar = abrir editor com initial = cfg, mas sem rastrear chave
+  // original — o save vai apenas adicionar/overwrite no slot da nova chave,
+  // deixando a entrada original intacta.
   const handleDuplicate = (cfg: LaunchConfig) => {
     setEditorInitial({ ...cfg });
+    setEditorMode("duplicate");
+    setEditorOriginalKey(null);
     setEditorOpen(true);
   };
 
@@ -189,12 +209,26 @@ export default function App() {
     await refresh();
   };
 
+  // Em modo "edit", se o usuário trocou backend (ou modelo) e salvou, a chave
+  // composta muda e o backend ia criar uma entrada nova deixando a antiga
+  // órfã. Aqui deletamos a antiga antes de gravar — comporta como "rename".
+  const rekeyIfNeeded = async (cfg: LaunchConfig) => {
+    if (editorMode !== "edit" || !editorOriginalKey) return;
+    if (editorOriginalKey.model === cfg.model &&
+        editorOriginalKey.backend === cfg.backend) return;
+    try {
+      await api.deleteConfig(editorOriginalKey.model, editorOriginalKey.backend);
+    } catch { /* se já não existe, ok */ }
+  };
+
   const handleSave = async (cfg: LaunchConfig) => {
+    await rekeyIfNeeded(cfg);
     await api.saveConfig(cfg);
     await refresh();
   };
 
   const handleLaunch = async (cfg: LaunchConfig) => {
+    await rekeyIfNeeded(cfg);
     await api.saveConfig(cfg);
     const r = await api.launch(cfg);
     setLaunchCfg(cfg);
@@ -279,8 +313,13 @@ export default function App() {
           <div className="bg-red-950/60 border border-red-800 text-red-200 rounded p-3 text-sm mono">
             ❌ {error}
             <div className="mt-1 text-red-300/70 text-xs">
-              Verifique se o servidor Python (api/server.py) está rodando.
+              Verifique se Python + FastAPI/uvicorn estão instalados e no PATH.
             </div>
+            {pythonLogPath && (
+              <div className="mt-1 text-red-300/70 text-xs">
+                Log do backend: <span className="text-red-200">{pythonLogPath}</span>
+              </div>
+            )}
           </div>
         )}
 
