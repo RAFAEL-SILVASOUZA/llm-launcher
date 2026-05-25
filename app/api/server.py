@@ -34,6 +34,7 @@ import socket
 import sys
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from queue import Queue, Empty
 from typing import Any
@@ -56,12 +57,22 @@ from api.core import (  # noqa: E402
     constants,
     estimator,
     gguf,
+    hf,
+    lms,
     models_repo,
     nvidia,
     runner,
+    running,
 )
 
-app = FastAPI(title="llm-launcher API", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Re-anexa llama-server órfãos da sessão anterior antes de aceitar requests.
+    _attach_orphan_servers()
+    yield
+
+
+app = FastAPI(title="llm-launcher API", version="0.1.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -154,10 +165,12 @@ def get_backends():
 
 @app.get("/api/system")
 def get_system():
+    total, avail = nvidia._ram_mib_pair()
     return {
         "vram_total_mib": nvidia.gpu_total_mib(),
         "vram_free_mib":  nvidia.gpu_free_mib(),
-        "ram_total_mib":  nvidia.ram_total_mib(),
+        "ram_total_mib":  total,
+        "ram_avail_mib":  avail,
     }
 
 
@@ -217,6 +230,28 @@ def estimate(req: EstimateRequest):
     )
 
 
+class EstimateManyRequest(BaseModel):
+    items: list[EstimateRequest]
+
+
+@app.post("/api/estimate-many")
+def estimate_many(req: EstimateManyRequest):
+    """Estimativa em lote — alimenta a coluna de status do grid sem N round-trips."""
+    out: list[dict] = []
+    for it in req.items:
+        try:
+            mmproj = Path(it.mmproj) if it.mmproj else None
+            est = estimator.estimate_memory(
+                Path(it.model), it.backend, it.context_window, it.parallel_slots,
+                it.kv_cache, it.gpu_layers, mmproj, it.cache_ram, it.mode,
+                n_cpu_moe=it.n_cpu_moe,
+            )
+            out.append({"ok": True, "estimate": est, "model": it.model, "backend": it.backend})
+        except Exception as e:
+            out.append({"ok": False, "error": str(e), "model": it.model, "backend": it.backend})
+    return out
+
+
 @app.post("/api/build-command")
 def build_command(cfg: LaunchConfig):
     try:
@@ -253,27 +288,45 @@ def suggest_ngl(req: SuggestRequest):
 # ─── launches: fila de eventos por id, runner em thread, SSE drain ────────────
 
 class LaunchSession:
-    def __init__(self, cfg: dict):
-        self.id = uuid.uuid4().hex[:12]
+    def __init__(self, cfg: dict, *, attached_pid: int | None = None, launch_id: str | None = None):
+        self.id = launch_id or uuid.uuid4().hex[:12]
         self.cfg = cfg
-        self.handle = runner.LaunchHandle()
+        self.handle = runner.LaunchHandle(attached_pid=attached_pid)
         self.queue: Queue[dict] = Queue()
         self.done = False
         self.thread: threading.Thread | None = None
+        self.attached = attached_pid is not None
+        if self.attached:
+            # Sessão sintética: alimenta a UI com 2 eventos pra parecer um
+            # launch normal já carregado. Stop ainda funciona porque o
+            # LaunchHandle conhece o PID.
+            self.queue.put({"type": "start", "attempt": 1, "cmd": "(reanexado)", "config": cfg})
+            self.queue.put({"type": "load_ok", "attempt": 1})
 
     def on_event(self, ev: dict) -> None:
         self.queue.put(ev)
         if ev.get("type") in ("done", "giveup"):
             self.done = True
 
+    def _register_pid(self, pid: int) -> None:
+        running.register(self.id, pid, self.cfg)
+
     def start(self) -> None:
+        if self.attached:
+            # Nada pra rodar — só aguarda cancel/morte do PID.
+            return
+
         def _runner_target():
             try:
-                runner.run_server_resiliently(self.cfg, self.on_event, self.handle)
+                runner.run_server_resiliently(
+                    self.cfg, self.on_event, self.handle,
+                    on_proc_pid=self._register_pid,
+                )
             except Exception as e:
                 self.on_event({"type": "giveup", "reason": f"runner crash: {e}"})
             finally:
                 self.done = True
+                running.deregister(self.id)
                 self.queue.put({"type": "_eof"})
 
         self.thread = threading.Thread(target=_runner_target, daemon=True)
@@ -326,7 +379,227 @@ def launch_cancel(launch_id: str):
     if session is None:
         raise HTTPException(404, "launch_id desconhecido")
     session.handle.cancel()
+    if session.attached:
+        # Sessão re-anexada não tem thread observando — fecha a sessão na mão.
+        session.done = True
+        running.deregister(session.id)
+        session.queue.put({"type": "giveup", "reason": "cancelled"})
+        session.queue.put({"type": "_eof"})
     return {"ok": True}
+
+
+# ─── routes: launches ativos (sobreviventes a restart do Python) ──────────────
+
+@app.get("/api/launches")
+def list_launches():
+    """Lista launches ativos — usado no boot do frontend pra recuperar
+    botão de Stop de servidores órfãos da sessão anterior."""
+    out = []
+    with _SESSIONS_LOCK:
+        for s in _SESSIONS.values():
+            if s.done:
+                continue
+            out.append({
+                "launch_id": s.id,
+                "attached":  s.attached,
+                "pid":       s.handle.pid,
+                "config":    s.cfg,
+            })
+    return out
+
+
+def _attach_orphan_servers() -> None:
+    """Boot-time: re-anexa llama-server.exe órfãos da sessão anterior.
+
+    Chamado uma vez no startup. Reconcilia o api_running.json filtrando
+    PIDs mortos / reciclados, depois cria LaunchSession sintética pra
+    cada sobrevivente — assim a UI consegue dar Stop neles.
+    """
+    survivors = running.reconcile()
+    for entry in survivors:
+        sid = entry.get("launch_id")
+        pid = int(entry.get("pid", 0) or 0)
+        cfg = entry.get("cfg") or {}
+        if not sid or not pid or not cfg:
+            continue
+        session = LaunchSession(cfg, attached_pid=pid, launch_id=sid)
+        with _SESSIONS_LOCK:
+            _SESSIONS[session.id] = session
+
+
+
+
+# ─── routes: HuggingFace download ─────────────────────────────────────────────
+
+class HfUrlRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/hf/resolve")
+def hf_resolve(req: HfUrlRequest):
+    try:
+        repo_id, filename, branch = hf.parse_hf_url(req.url)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"repo_id": repo_id, "filename": filename, "branch": branch}
+
+
+class HfRepoRequest(BaseModel):
+    repo_id: str
+
+
+@app.post("/api/hf/list")
+def hf_list(req: HfRepoRequest):
+    try:
+        files = hf.hf_list_files(req.repo_id)
+    except Exception as e:
+        raise HTTPException(400, f"falha ao listar {req.repo_id}: {e}")
+    grouped = hf.group_gguf_files(files)
+    return {"repo_id": req.repo_id, "files": files, **grouped}
+
+
+class HfSearchRequest(BaseModel):
+    query: str
+    limit: int = 25
+
+
+@app.post("/api/hf/search")
+def hf_search(req: HfSearchRequest):
+    try:
+        return {"results": hf.hf_search_gguf(req.query, req.limit)}
+    except Exception as e:
+        raise HTTPException(400, f"busca falhou: {e}")
+
+
+class HfDownloadRequest(BaseModel):
+    repo_id: str
+    branch: str = "main"
+    rel_paths: list[str]
+    subdir: str | None = None
+
+
+class DownloadSession:
+    def __init__(self, plan: dict):
+        self.id = uuid.uuid4().hex[:12]
+        self.plan = plan
+        self.queue: Queue[dict] = Queue()
+        self.thread: threading.Thread | None = None
+        self.cancelled = False
+
+    def start(self) -> None:
+        def _target():
+            try:
+                for ev in hf.stream_download(self.plan):
+                    if self.cancelled:
+                        self.queue.put({"type": "cancelled"})
+                        break
+                    self.queue.put(ev)
+            except Exception as e:
+                self.queue.put({"type": "error", "rel": "", "message": str(e)})
+            finally:
+                self.queue.put({"type": "_eof"})
+
+        self.thread = threading.Thread(target=_target, daemon=True)
+        self.thread.start()
+
+
+_DOWNLOADS: dict[str, DownloadSession] = {}
+_DOWNLOADS_LOCK = threading.Lock()
+
+
+@app.post("/api/hf/download")
+def hf_download(req: HfDownloadRequest):
+    plan = hf.plan_download(req.repo_id, req.branch, req.rel_paths, req.subdir)
+    session = DownloadSession(plan)
+    with _DOWNLOADS_LOCK:
+        _DOWNLOADS[session.id] = session
+    session.start()
+    return {"download_id": session.id, "plan": plan}
+
+
+@app.get("/api/hf/download/{download_id}/events")
+async def hf_download_events(download_id: str, request: Request):
+    with _DOWNLOADS_LOCK:
+        session = _DOWNLOADS.get(download_id)
+    if session is None:
+        raise HTTPException(404, "download_id desconhecido")
+
+    async def generator():
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                ev = session.queue.get(timeout=0.5)
+            except Empty:
+                yield ": keepalive\n\n"
+                continue
+            if ev.get("type") == "_eof":
+                return
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(generator(), media_type="text/event-stream")
+
+
+@app.post("/api/hf/download/{download_id}/cancel")
+def hf_download_cancel(download_id: str):
+    with _DOWNLOADS_LOCK:
+        session = _DOWNLOADS.get(download_id)
+    if session is None:
+        raise HTTPException(404, "download_id desconhecido")
+    session.cancelled = True
+    return {"ok": True}
+
+
+# ─── routes: delete model ─────────────────────────────────────────────────────
+
+class DeleteModelRequest(BaseModel):
+    model: str
+    confirm: bool = False
+
+
+@app.post("/api/models/plan-delete")
+def model_plan_delete(req: DeleteModelRequest):
+    """Lista o que seria removido sem apagar nada."""
+    files = models_repo.plan_delete_model(Path(req.model))
+    total = 0
+    for f in files:
+        try:
+            total += f.stat().st_size
+        except Exception:
+            pass
+    return {
+        "files": [str(f) for f in files],
+        "total_bytes": total,
+        "count": len(files),
+    }
+
+
+@app.delete("/api/models")
+def model_delete(req: DeleteModelRequest):
+    if not req.confirm:
+        raise HTTPException(400, "confirm=true é obrigatório")
+    result = models_repo.delete_model(Path(req.model))
+    # Também remove as configs salvas do modelo (todos os backends)
+    config_store.delete_config(req.model, backend=None)
+    return result
+
+
+# ─── routes: LM Studio fallback ───────────────────────────────────────────────
+
+@app.get("/api/lms/status")
+def lms_status_route():
+    return lms.lms_status()
+
+
+class LmsLoadRequest(BaseModel):
+    model: str
+    context_window: int = 65_536
+    parallel_slots: int = 1
+
+
+@app.post("/api/lms/load")
+def lms_load(req: LmsLoadRequest):
+    return lms.load_via_lms(Path(req.model), req.context_window, req.parallel_slots)
 
 
 # ─── bootstrap: porta livre + arquivo + stdout ────────────────────────────────

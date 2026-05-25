@@ -103,6 +103,69 @@ def collect_models(models_dir: Path = MODELS_DIR) -> list[Path]:
     return sorted(f for f in models_dir.rglob("*.gguf") if is_primary_part(f))
 
 
+def plan_delete_model(model_path: Path) -> list[Path]:
+    """Lista todos os arquivos que seriam removidos (não remove nada).
+
+    Inclui o(s) .gguf do quant, mmproj associado e arquivos .part de download
+    interrompido. Sempre dedup, preserva ordem, só lista o que existe.
+    """
+    folder = model_path.parent
+    to_remove: list[Path] = []
+    m = SPLIT_RE.match(model_path.name)
+    if m:
+        key = m.group("base")
+        for f in sorted(folder.glob("*.gguf")):
+            if not is_mmproj(f.name) and gguf_group_key(f.name) == key:
+                to_remove.append(f)
+    else:
+        to_remove.append(model_path)
+
+    mm = find_mmproj(folder, include_parent=False)
+    if mm:
+        to_remove.append(mm)
+
+    for f in list(to_remove):
+        part = f.with_name(f.name + ".part")
+        if part.exists():
+            to_remove.append(part)
+
+    seen: set[Path] = set()
+    return [f for f in to_remove if f.exists() and not (f in seen or seen.add(f))]
+
+
+def rmdir_if_empty(path: Path, stop_at: Path) -> None:
+    """Sobe removendo diretórios vazios até (sem incluir) stop_at."""
+    try:
+        while path != stop_at and path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+            path = path.parent
+    except Exception:
+        pass
+
+
+def delete_model(model_path: Path, models_dir: Path = MODELS_DIR) -> dict:
+    """Apaga os arquivos listados por plan_delete_model + diretórios vazios.
+
+    Retorna {removed: [paths], errors: [{path, error}], total_bytes}.
+    """
+    targets = plan_delete_model(model_path)
+    removed: list[str] = []
+    errors: list[dict] = []
+    total = 0
+    for f in targets:
+        try:
+            total += f.stat().st_size
+        except Exception:
+            pass
+        try:
+            f.unlink()
+            removed.append(str(f))
+        except Exception as e:
+            errors.append({"path": str(f), "error": str(e)})
+    rmdir_if_empty(model_path.parent, models_dir)
+    return {"removed": removed, "errors": errors, "total_bytes": total}
+
+
 def describe_model(model_path: Path, models_dir: Path = MODELS_DIR) -> dict:
     """Dict serializável com infos básicas — alimenta a lista no frontend."""
     mmproj = find_mmproj(model_path.parent)

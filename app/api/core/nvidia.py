@@ -1,12 +1,18 @@
 """nvidia-smi: VRAM (total/livre/usada), status detalhado e RAM total do sistema."""
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from .constants import NVIDIA_SMI
 
 _MIB = 1024 * 1024
-_VRAM_INFO_CACHE: tuple[int, int] | None = None
+# (timestamp, (total_mib, free_mib)). TTL curto: dados de VRAM mudam o tempo
+# todo, queremos a barra do header acompanhando, mas sem rodar nvidia-smi a
+# cada chamada do estimador.
+_VRAM_INFO_CACHE: tuple[float, tuple[int, int]] | None = None
+_VRAM_TTL_SECS = 2.0
+
 _RAM_TOTAL_CACHE: int | None = None
 
 NVIDIA_QUERY_FIELDS = [
@@ -27,12 +33,18 @@ def nvidia_smi_path() -> str:
 def gpu_mem_mib(force_refresh: bool = False) -> tuple[int | None, int | None]:
     """(total, livre) em MiB. (None, None) se indisponível.
 
-    Usa o *livre* — o SO/driver/desktop seguram ~1 GB que o llama.cpp nunca vê.
-    Comparar com total subestima a ocupação.
+    Cache com TTL curto (_VRAM_TTL_SECS) — múltiplas chamadas dentro de uma
+    request HTTP reusam o resultado, mas o próximo poll do header pega
+    valores atualizados. Antes era cache eterno, o que travava as barras.
     """
     global _VRAM_INFO_CACHE
-    if _VRAM_INFO_CACHE is not None and not force_refresh:
-        t, fr = _VRAM_INFO_CACHE
+    now = time.time()
+    if (
+        _VRAM_INFO_CACHE is not None
+        and not force_refresh
+        and (now - _VRAM_INFO_CACHE[0]) < _VRAM_TTL_SECS
+    ):
+        t, fr = _VRAM_INFO_CACHE[1]
         return (t or None, fr or None)
     smi = nvidia_smi_path()
     try:
@@ -42,11 +54,11 @@ def gpu_mem_mib(force_refresh: bool = False) -> tuple[int | None, int | None]:
         )
         if r.returncode == 0 and r.stdout.strip():
             total_s, free_s = (x.strip() for x in r.stdout.strip().splitlines()[0].split(","))
-            _VRAM_INFO_CACHE = (int(total_s), int(free_s))
-            return _VRAM_INFO_CACHE
+            _VRAM_INFO_CACHE = (now, (int(total_s), int(free_s)))
+            return _VRAM_INFO_CACHE[1]
     except Exception:
         pass
-    _VRAM_INFO_CACHE = (0, 0)
+    _VRAM_INFO_CACHE = (now, (0, 0))
     return (None, None)
 
 
@@ -58,10 +70,12 @@ def gpu_free_mib() -> int | None:
     return gpu_mem_mib()[1]
 
 
-def ram_total_mib() -> int | None:
+def _ram_mib_pair() -> tuple[int | None, int | None]:
+    """Devolve (total, avail) em MiB. `total` é cacheado (não muda durante a
+    sessão); `avail` é sempre fresco — usado por show_memory_estimate e pela
+    barra do header pra refletir RAM realmente livre agora.
+    """
     global _RAM_TOTAL_CACHE
-    if _RAM_TOTAL_CACHE is not None:
-        return _RAM_TOTAL_CACHE or None
     try:
         if sys.platform == "win32":
             import ctypes
@@ -80,17 +94,34 @@ def ram_total_mib() -> int | None:
             stat = _MEMSTAT()
             stat.dwLength = ctypes.sizeof(_MEMSTAT)
             ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-            _RAM_TOTAL_CACHE = int(stat.ullTotalPhys // _MIB)
-            return _RAM_TOTAL_CACHE
+            total = int(stat.ullTotalPhys // _MIB)
+            avail = int(stat.ullAvailPhys // _MIB)
+            _RAM_TOTAL_CACHE = total
+            return (total or None, avail or None)
+        # Linux fallback — lê MemTotal e MemAvailable do /proc/meminfo
+        total: int | None = None
+        avail: int | None = None
         with open("/proc/meminfo") as f:
             for line in f:
                 if line.startswith("MemTotal:"):
-                    _RAM_TOTAL_CACHE = int(line.split()[1]) // 1024
-                    return _RAM_TOTAL_CACHE
+                    total = int(line.split()[1]) // 1024
+                elif line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1]) // 1024
+                if total and avail:
+                    break
+        if total:
+            _RAM_TOTAL_CACHE = total
+        return (total, avail)
     except Exception:
-        pass
-    _RAM_TOTAL_CACHE = 0
-    return None
+        return (_RAM_TOTAL_CACHE or None, None)
+
+
+def ram_total_mib() -> int | None:
+    return _ram_mib_pair()[0]
+
+
+def ram_avail_mib() -> int | None:
+    return _ram_mib_pair()[1]
 
 
 def nvidia_status() -> dict:

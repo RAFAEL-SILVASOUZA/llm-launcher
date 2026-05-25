@@ -16,6 +16,8 @@ Eventos:
     {"type": "giveup",    "reason": "…"}                       — escada esgotada / loop
     {"type": "done"}                                           — terminou normalmente
 """
+import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -37,18 +39,43 @@ SERVER_BACKOFF_MAX    = 30
 
 
 class LaunchHandle:
-    """Handle de um launch em curso — permite cancelar de fora (UI cancel)."""
-    def __init__(self):
+    """Handle de um launch — permite cancelar de fora (UI cancel).
+
+    Dois modos:
+      - normal: spawneamos via Popen, `_proc` está setado.
+      - attached: re-anexamos um llama-server órfão de uma sessão anterior do
+        Python; só temos o PID. `_proc` é None, cancel usa kill_pid_tree.
+    """
+    def __init__(self, attached_pid: int | None = None):
         self._cancelled = False
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
+        self._attached_pid: int | None = attached_pid
+
+    @property
+    def pid(self) -> int | None:
+        if self._proc is not None:
+            return self._proc.pid
+        return self._attached_pid
+
+    @property
+    def attached(self) -> bool:
+        return self._proc is None and self._attached_pid is not None
 
     def cancel(self) -> None:
+        # Import tardio pra evitar ciclo (running → runner não importa, OK).
+        from . import running
         with self._lock:
             self._cancelled = True
-            if self._proc and self._proc.poll() is None:
+            pid = self.pid
+            if pid is None:
+                return
+            if self._proc is not None and self._proc.poll() is not None:
+                return  # já encerrou sozinho
+            running.kill_pid_tree(pid)
+            if self._proc is not None:
                 try:
-                    self._proc.terminate()
+                    self._proc.wait(timeout=5)
                 except Exception:
                     pass
 
@@ -59,16 +86,26 @@ class LaunchHandle:
     def _set_proc(self, proc: subprocess.Popen) -> None:
         with self._lock:
             self._proc = proc
+            self._attached_pid = None
 
 
 def _run_capturing(cmd: str, handle: LaunchHandle, on_line: Callable[[str], None],
-                   on_load: Callable[[], None]) -> tuple[int, str, float | None]:
+                   on_load: Callable[[], None],
+                   on_proc_pid: Callable[[int], None] | None = None,
+                   ) -> tuple[int, str, float | None]:
+    # Removido shell=True: no Windows, shell=True cria cmd.exe wrapper que
+    # survive ao terminate(), deixando o llama-server rodando sozinho.
     proc = subprocess.Popen(
-        cmd, shell=True,
+        shlex.split(cmd),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, encoding="utf-8", errors="replace",
     )
     handle._set_proc(proc)
+    if on_proc_pid is not None:
+        try:
+            on_proc_pid(proc.pid)
+        except Exception:
+            pass
     chunks: list[str] = []
     load_ts: float | None = None
     assert proc.stdout is not None
@@ -115,6 +152,7 @@ def run_server_resiliently(
     on_event: EventCallback,
     handle: LaunchHandle | None = None,
     stop_lms: bool = True,
+    on_proc_pid: Callable[[int], None] | None = None,
 ) -> None:
     """Loop: launch → detecta load → roda → se cair, classifica + degrada + reinicia.
 
@@ -153,7 +191,9 @@ def run_server_resiliently(
         def on_line(line: str) -> None:
             on_event({"type": "stdout", "line": line})
 
-        rc, output, load_ts = _run_capturing(cmd, handle, on_line, on_load)
+        rc, output, load_ts = _run_capturing(
+            cmd, handle, on_line, on_load, on_proc_pid=on_proc_pid,
+        )
         on_event({"type": "exit", "attempt": attempt, "rc": rc, "load_ts": load_ts})
 
         if handle.cancelled():
