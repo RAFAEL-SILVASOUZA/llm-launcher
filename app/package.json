@@ -1,0 +1,52 @@
+{
+  "name": "llm-launcher",
+  "version": "0.1.0",
+  "description": "Visual launcher for llama.cpp models — replaces models.py",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev:vite": "vite",
+    "dev:electron": "wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 electron .",
+    "dev": "concurrently -k -n vite,electron -c blue,magenta \"npm:dev:vite\" \"npm:dev:electron\"",
+    "build:vite": "vite build",
+    "build:typecheck": "tsc --noEmit",
+    "build": "npm run build:typecheck && npm run build:vite && electron-builder --win",
+    "start": "electron .",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.16",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.llm.launcher",
+    "productName": "LLM Launcher",
+    "win": {
+      "target": "portable"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "api/**/*",
+      "requirements.txt",
+      "package.json",
+      "!**/__pycache__"
+    ]
+  }
+}

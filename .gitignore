@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+node_modules/
+dist/
+*.tmp
+.env
+.env.local

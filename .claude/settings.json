@@ -2,6 +2,11 @@
   "shellAllow": [
     "pip install prompt_toolkit",
     "pip install questionary",
-    "dir /b /s \"C:\\Projetos\\llama-cpp-turboquant\" | findstr /i \"llama-cpp-turboquant.py\""
+    "dir /b /s \"C:\\Projetos\\llama-cpp-turboquant\" | findstr /i \"llama-cpp-turboquant.py\"",
+    "docker start searxng caddy open-webui",
+    "docker compose down",
+    "docker stop searxng caddy open-webui",
+    "docker ps -a",
+    "docker-machine stop default 2>nul || wsl --shutdown 2>nul || taskkill /F /IM \"Docker Desktop.exe\" 2>nul || taskkill /F /IM com.docker.backend.exe 2>nul || echo \"Docker Desktop precisa ser fechado manualmente\""
   ]
 }

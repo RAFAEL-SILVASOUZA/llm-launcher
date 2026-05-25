@@ -86,7 +86,7 @@ STABILIZE_SECONDS = 30  # tempo sem crash pós-load pra promover a config a "boa
 CPU_THREADS_GEN   = 14
 CPU_THREADS_BATCH = 20
 
-THINKING_KEYWORDS = {"qwen3", "qwq", "deepseek-r1", "thinking"}
+THINKING_KEYWORDS = {"qwen3", "qwq", "deepseek-r1", "thinking", "reasoning"}
 
 # ─── choices ──────────────────────────────────────────────────────────────────
 
@@ -125,7 +125,7 @@ CONTEXT_CHOICES = [
 ]
 
 REASONING_BUDGET_CHOICES = [
-    questionary.Choice("    0  — Desabilitar thinking  (/no_think)", value=0),
+    questionary.Choice("    0  — Desabilitar thinking  (--reasoning off)", value=0),
     questionary.Choice(" 1024  — Rápido",                            value=1_024),
     questionary.Choice(" 2048",                                       value=2_048),
     questionary.Choice(" 4096  [recomendado — agentes de código]",   value=4_096),
@@ -223,6 +223,47 @@ def backend_binary(backend: str, mode: str) -> Path:
     return BACKENDS[backend]["server" if mode == "server" else "cli"]
 
 
+_BACKEND_HELP_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _backend_help_text(backend: str, mode: str) -> str:
+    """Texto de `--help` do binário do (backend, mode), cacheado em memória.
+
+    Primeira invocação ~80-200 ms; depois zero. String vazia se o binário
+    não existe ou o `--help` falhou — quem chama decide o fallback.
+    """
+    ck = (backend, mode)
+    if ck in _BACKEND_HELP_CACHE:
+        return _BACKEND_HELP_CACHE[ck]
+
+    text = ""
+    bin_path = backend_binary(backend, mode)
+    if bin_path.exists():
+        try:
+            r = subprocess.run(
+                [str(bin_path), "--help"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=10,
+            )
+            text = (r.stdout or "") + (r.stderr or "")
+        except Exception:
+            text = ""
+    _BACKEND_HELP_CACHE[ck] = text
+    return text
+
+
+def _backend_supports_chat_template_kwargs(backend: str, mode: str) -> bool:
+    """True se o binário lista --chat-template-kwargs no --help.
+
+    Se o --help não pôde ser lido (binário ausente/timeout), assume True:
+    no server o auto-degrade remove a flag caso ela seja rejeitada de fato.
+    """
+    help_text = _backend_help_text(backend, mode)
+    if not help_text:
+        return True
+    return "--chat-template-kwargs" in help_text
+
+
 # Fallback estático caso o probe --help falhe (binário ausente, timeout, regex
 # não casa). Cobre o que sabemos que os 3 backends compilados oferecem hoje.
 _KV_TYPES_FALLBACK: dict[str, set[str]] = {
@@ -265,14 +306,8 @@ def _probe_kv_types(backend: str, mode: str) -> set[str]:
         _KV_TYPES_CACHE[cache_key] = fallback
         return fallback
 
-    try:
-        r = subprocess.run(
-            [str(bin_path), "--help"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=10,
-        )
-        text = (r.stdout or "") + (r.stderr or "")
-    except Exception:
+    text = _backend_help_text(backend, mode)
+    if not text:
         _KV_TYPES_CACHE[cache_key] = fallback
         return fallback
 
@@ -600,15 +635,18 @@ def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | No
 
     if failure == Failure.UNSUPPORTED_FLAG:
         flag = _extract_unknown_flag(error_excerpt)
-        if flag == "--reasoning-budget" and cfg.get("reasoning_budget") is not None:
+        if flag in ("--reasoning-budget", "--reasoning") and cfg.get("reasoning_budget") is not None:
             cfg["reasoning_budget"] = None
-            return cfg, "removido --reasoning-budget (build não suporta)"
+            return cfg, "removido flag de reasoning (build não suporta)"
         if flag == "--n-cpu-moe" and cfg.get("n_cpu_moe", 0):
             cfg["n_cpu_moe"] = 0
             return cfg, "removido --n-cpu-moe (build não suporta)"
         if flag == "--ctx-checkpoints" and cfg.get("ctx_checkpoints", 0):
             cfg["ctx_checkpoints"] = 0
             return cfg, "removido --ctx-checkpoints (build não suporta)"
+        if flag == "--chat-template-kwargs" and cfg.get("preserve_thinking"):
+            cfg["preserve_thinking"] = False
+            return cfg, "removido --chat-template-kwargs (build não suporta)"
         # Sem mapeamento direto: cai pra escada genérica abaixo.
 
     if failure == Failure.KV_TYPE_REJECTED:
@@ -702,6 +740,7 @@ def _build_cmd_from_cfg(cfg: dict) -> str:
         ctx_checkpoints=cfg.get("ctx_checkpoints", 8),
         n_cpu_moe=cfg.get("n_cpu_moe", 0),
         spec_draft_n_max=cfg.get("spec_draft_n_max", 2),
+        preserve_thinking=cfg.get("preserve_thinking", False),
         mmproj=Path(mmproj) if mmproj else None,
         verbose=cfg.get("verbose", False),
     )
@@ -1459,13 +1498,44 @@ _KV_BYTES_PER_ELEM = {
     "turbo4": 0.55,     # ~4.4 bits efetivos
 }
 
-# Compute buffer da GPU: parte fixa do grafo + parcela que escala com o dtype
-# do KV cache (o grafo de atenção carrega tensores no tipo do KV). Calibrado
-# contra Qwen3-Next 80B @ ctx 200k, ub 512: KV bf16 → ~800 MiB, f32 → ~1150.
+# Compute buffer da GPU pra modelos NÃO-SSM (transformers densos / MoE clássicas).
+# Parte fixa do grafo + parcela que escala com o dtype do KV cache (o grafo de
+# atenção carrega tensores no tipo do KV). Calibrado contra Qwen3-Next 80B
+# @ ctx 200k, ub 512: KV bf16 → ~800 MiB, f32 → ~1150.
 _GPU_COMPUTE_BASE_MIB = 450
 _GPU_COMPUTE_KV_COEF  = 176          # MiB por byte-por-elemento do KV cache
 _GPU_COMPUTE_PARALLEL_MIB = 220      # MiB extra por slot -np além do primeiro
-_WEIGHT_OVERHEAD     = 1.05          # alinhamento + buffers extras sobre o .gguf
+
+# Em híbridos SSM com fused Gated Delta Net (arch qwen35/qwen3next) o scratch
+# da DeltaNet domina o compute e escala LINEAR com ctx — quase não depende do
+# dtype do KV. Substitui a fórmula base+KV_coef. Calibrado contra Qwen3.6 27B
+# qwen35:
+#   ctx  65k q8_0 → real 495 MiB
+#   ctx 262k bf16 → real 1915 MiB
+# Fit linear: 50 + 240 × (ctx/32k). Pequena folga conservadora vs ajuste exato
+# (21 + 237 × ctx/32k) pra absorver variação por ub/np.
+_GPU_COMPUTE_SSM_BASE_MIB  = 50
+_GPU_COMPUTE_SSM_PER_32K   = 240
+
+# Contexto MTP de rascunho (head MTP) cria um SEGUNDO llama_context com KV de
+# uma camada full-attention + compute buffer próprio. KV escala com ctx;
+# compute medido contra Qwen3.6 27B @ ctx 262k (824 MiB no log de OOM).
+_MTP_DRAFT_COMPUTE_MIB = 800
+
+# mmproj (visão): pesos vão pra VRAM no load; o COMPUTE buffer é alocado em
+# warmup (imagem máxima do modelo). Em Qwen3-VL 27B BF16 @ 1472² o warmup pede
+# 248 MiB e pode ser rejeitado silenciosamente quando a VRAM tá apertada — o
+# servidor sobe mas qualquer requisição multimodal estoura OOM. Manter no total
+# pra a barra refletir "imagem funciona ou não".
+_MMPROJ_COMPUTE_MIB  = 250
+
+# Overhead sobre tensor_total (alinhamento + buffers internos do llama.cpp).
+# Validado contra Qwen3.6 27B qwen35 Q6_K: tensor sum 21347 MiB, GPU+CPU
+# loaded 21347 MiB → overhead efetivo ~0%. Mantemos 2% só pra absorver
+# variação entre builds — o antigo 1.05 (5%) inflava ~1 GB e fazia ESTOURA
+# falso. Aplicado quando NÃO temos tensor_total_mib do GGUF; com tensor_total
+# usamos os valores exatos.
+_WEIGHT_OVERHEAD     = 1.02
 _MIB                 = 1024 * 1024
 
 # Bytes por elemento dos tensores GGUF, por ggml_type. Quants usam blocos com
@@ -1513,6 +1583,13 @@ _MOE_TENSOR_RE = re.compile(r"blk\.(\d+)\.[^/]*?(?:_exps|\.exps)", re.IGNORECASE
 # Tensor da projeção K da atenção — presente só nas camadas de atenção plena.
 # Em híbridos SSM (qwen3next etc.) as camadas DeltaNet/SSM não têm esse tensor.
 _ATTN_K_TENSOR_RE = re.compile(r"blk\.(\d+)\.attn_k", re.IGNORECASE)
+# Tensores especiais que NÃO ficam dentro de `blk.N.*` — afetam a política de
+# offload do llama.cpp (output sai pra GPU primeiro quando -ngl>=1; token_embd
+# só vai pra GPU quando -ngl > n_layer+1). Validado contra Qwen3.6 27B qwen35
+# Q6_K @ -ngl 64 (CPU buffer 1294 MiB = token_embd 994 + 1 block 298).
+_TOKEN_EMBD_RE   = re.compile(r"^token_embd\.", re.IGNORECASE)
+_OUTPUT_RE       = re.compile(r"^output\.weight$", re.IGNORECASE)
+_BLOCK_RE        = re.compile(r"^blk\.(\d+)\.", re.IGNORECASE)
 
 _GGUF_META_CACHE: dict[str, dict] = {}
 
@@ -1520,9 +1597,15 @@ _GGUF_META_CACHE: dict[str, dict] = {}
 def _gguf_meta(model_path: Path) -> dict | None:
     """Lê metadados do GGUF (arch, n_layer, n_head_kv, head_dim). Cache por path.
 
-    Quando o modelo é MoE (expert_count > 0), também parseia a seção de
-    tensors e calcula o peso médio dos tensores `ffn_*_exps` por camada —
-    usado pelo estimador pra sugerir um default de `--n-cpu-moe`.
+    Sempre percorre a seção de tensor_info pra coletar:
+      - peso médio dos tensores `ffn_*_exps` por camada (MoE) — alimenta a
+        sugestão de `--n-cpu-moe`.
+      - quais camadas têm atenção plena (híbridos SSM tipo qwen3next/qwen35
+        deixam só um subconjunto, o resto é DeltaNet/SSM sem KV ctx-scaling).
+      - tamanho exato em bytes de `token_embd.weight`, `output.weight` e do
+        somatório de todos os `blk.N.*` — alimenta o split de pesos GPU/CPU
+        no estimador (llama.cpp offloada output primeiro, deixa token_embd
+        e o(s) bloco(s) excedentes na CPU quando `-ngl <= n_layer`).
     """
     import struct
     key = str(model_path)
@@ -1533,6 +1616,10 @@ def _gguf_meta(model_path: Path) -> dict | None:
     n_tensors = 0
     moe_per_layer_bytes: dict[int, float] = {}
     attn_layer_set: set[int] = set()
+    token_embd_bytes  = 0.0
+    output_bytes      = 0.0
+    blocks_bytes      = 0.0
+    other_bytes       = 0.0
     try:
         with open(model_path, "rb") as f:
             if f.read(4) != b"GGUF":
@@ -1575,35 +1662,40 @@ def _gguf_meta(model_path: Path) -> dict | None:
                 vtype = struct.unpack("<I", f.read(4))[0]
                 raw[k_str] = read_value(vtype)
 
-            # Seção de tensor_info. Vale percorrer pra (a) medir o peso MoE
-            # por camada e (b) descobrir quais camadas têm atenção plena —
-            # híbridos SSM (qwen3next etc.) têm só um subconjunto, e o KV
-            # cache só escala com o ctx nessas.
-            arch_peek = raw.get("general.architecture")
-            expert_count_peek = raw.get(f"{arch_peek}.expert_count", 0) if arch_peek else 0
-            is_hybrid_peek = (
-                any(k.startswith(f"{arch_peek}.ssm.") for k in raw) if arch_peek else False
-            )
-            if (expert_count_peek or is_hybrid_peek) and n_tensors:
-                for _ in range(n_tensors):
-                    nl = struct.unpack("<Q", f.read(8))[0]
-                    tname = f.read(nl).decode("utf-8", errors="replace")
-                    n_dims = struct.unpack("<I", f.read(4))[0]
-                    dims = [struct.unpack("<Q", f.read(8))[0] for _ in range(n_dims)]
-                    ttype = struct.unpack("<I", f.read(4))[0]
-                    f.read(8)                                      # offset (ignorado)
-                    am = _ATTN_K_TENSOR_RE.search(tname)
-                    if am:
-                        attn_layer_set.add(int(am.group(1)))
+            # Seção de tensor_info. Sempre percorrer — alimenta múltiplos campos:
+            #   - moe_per_layer_bytes  (pesos `ffn_*_exps`, pra sugestão de ncmoe)
+            #   - attn_layer_set       (quais camadas têm KV ctx-scaling em híbridos)
+            #   - token_embd / output / blocks bytes (split exato GPU/CPU)
+            for _ in range(n_tensors):
+                nl = struct.unpack("<Q", f.read(8))[0]
+                tname = f.read(nl).decode("utf-8", errors="replace")
+                n_dims = struct.unpack("<I", f.read(4))[0]
+                dims = [struct.unpack("<Q", f.read(8))[0] for _ in range(n_dims)]
+                ttype = struct.unpack("<I", f.read(4))[0]
+                f.read(8)                                      # offset (ignorado)
+
+                elems = 1
+                for d in dims:
+                    elems *= d
+                bpe = _GGML_BYTES_PER_ELEM.get(ttype, 1.0)
+                t_bytes = elems * bpe
+
+                am = _ATTN_K_TENSOR_RE.search(tname)
+                if am:
+                    attn_layer_set.add(int(am.group(1)))
+
+                if _TOKEN_EMBD_RE.match(tname):
+                    token_embd_bytes += t_bytes
+                elif _OUTPUT_RE.match(tname):
+                    output_bytes += t_bytes
+                elif _BLOCK_RE.match(tname):
+                    blocks_bytes += t_bytes
                     m = _MOE_TENSOR_RE.search(tname)
-                    if not m:
-                        continue
-                    elems = 1
-                    for d in dims:
-                        elems *= d
-                    bpe = _GGML_BYTES_PER_ELEM.get(ttype, 1.0)
-                    li = int(m.group(1))
-                    moe_per_layer_bytes[li] = moe_per_layer_bytes.get(li, 0.0) + elems * bpe
+                    if m:
+                        li = int(m.group(1))
+                        moe_per_layer_bytes[li] = moe_per_layer_bytes.get(li, 0.0) + t_bytes
+                else:
+                    other_bytes += t_bytes
     except Exception:
         _GGUF_META_CACHE[key] = {}
         return None
@@ -1670,6 +1762,26 @@ def _gguf_meta(model_path: Path) -> dict | None:
         avg_bytes = sum(moe_per_layer_bytes.values()) / moe_layers_count
         moe_per_layer_mib = int(avg_bytes / _MIB)
 
+    # Template de chat embutido (Jinja). Alguns expõem a variável
+    # `preserve_thinking` — quando o launcher passa --chat-template-kwargs
+    # com ela, o template mantém os blocos <think> de turnos anteriores no
+    # histórico em vez de descartá-los. Ver build_command.
+    chat_template = raw.get("tokenizer.chat_template") or ""
+
+    # Split exato de pesos GPU/CPU: o llama.cpp trata `output.weight` e
+    # `token_embd.weight` como "layers" separadas das `blk.N.*`. Ordem real
+    # de offload com -ngl K (validado contra Qwen3.6 27B qwen35 ngl=64):
+    #   K == 0          → nada na GPU
+    #   1..n_layer      → output + (K-1) blocks na GPU; resto + token_embd na CPU
+    #   n_layer+1       → output + todos os blocks na GPU; token_embd na CPU
+    #   >= n_layer+2    → tudo na GPU (output + blocks + token_embd)
+    # Quando o tensor_info não pôde ser lido (n_tensors == 0), os _mib vão a 0
+    # e o estimador cai pro fallback gpu_frac antigo.
+    token_embd_mib  = int(token_embd_bytes  / _MIB)
+    output_mib      = int(output_bytes      / _MIB)
+    blocks_mib      = int(blocks_bytes      / _MIB)
+    tensor_total_mib = token_embd_mib + output_mib + blocks_mib + int(other_bytes / _MIB)
+
     meta = {
         "arch":              arch,
         "n_layer":           int(n_layer),
@@ -1687,11 +1799,18 @@ def _gguf_meta(model_path: Path) -> dict | None:
         "expert_used_count": expert_used_count,
         "moe_layers_count":  moe_layers_count,
         "moe_per_layer_mib": moe_per_layer_mib,
+        # Tensores não-block (afetam o split GPU/CPU) e somatório de blocos.
+        "token_embd_mib":    token_embd_mib,
+        "output_mib":        output_mib,
+        "blocks_mib":        blocks_mib,
+        "tensor_total_mib":  tensor_total_mib,
         # Camadas com atenção plena (KV escala com ctx). Vazio = não foi
         # possível inspecionar tensores → trata todas as camadas como atenção.
         "attn_layers":       sorted(attn_layer_set),
         # Estado recorrente por camada SSM (MiB, f32). 0 = não é híbrido SSM.
         "ssm_state_per_layer_mib": ssm_state_per_layer_mib,
+        # Template de chat referencia a variável `preserve_thinking`?
+        "supports_preserve_thinking": "preserve_thinking" in chat_template,
     }
     _GGUF_META_CACHE[key] = meta
     return meta
@@ -1737,6 +1856,23 @@ def _kv_cache_mib(meta: dict, ctx: int, parallel: int,
         per_token = n_kv_i * (h_k * bytes_pe_k + h_v * bytes_pe_v)
         total_bytes += per_token * layer_ctx * parallel
     return int(total_bytes / _MIB)
+
+
+def _mtp_draft_kv_mib(meta: dict, ctx: int,
+                      bytes_pe_k: float, bytes_pe_v: float) -> int:
+    """KV cache do contexto MTP de rascunho: 1 layer full-attention sobre ctx inteiro.
+
+    O fork mtp do llama.cpp cria um segundo llama_context pra head MTP com
+    n_ctx = ctx do main e n_layer = 1. Sem SWA (a head usa atenção plena).
+    Usa o n_head_kv máximo do modelo pra ser conservador em arquiteturas
+    com per-layer GQA variável.
+    """
+    nk = meta["n_head_kv"]
+    n_kv = max(nk) if isinstance(nk, list) else int(nk)
+    h_k  = meta["head_dim_k"]
+    h_v  = meta["head_dim_v"]
+    bytes_total = n_kv * (h_k * bytes_pe_k + h_v * bytes_pe_v) * ctx
+    return int(bytes_total / _MIB)
 
 
 def _model_disk_size_mib(model_path: Path) -> int:
@@ -1831,6 +1967,76 @@ def _ram_total_mib() -> int | None:
     return None
 
 
+def _split_weights_by_ngl(
+    meta:           dict | None,
+    weights_total:  int,
+    gpu_layers:     int,
+) -> tuple[int, int]:
+    """Decide quantos MiB de pesos ficam em VRAM vs CPU, dado -ngl K.
+
+    Política real do llama.cpp (validado contra Qwen3.6 27B qwen35 Q6_K @ ngl=64,
+    com CPU buffer = 1294 MiB ≈ token_embd 994 + 1 bloco SSM 298):
+
+        K == 0          → 0 na GPU
+        1..n_layer      → output + (K-1) blocos na GPU; resto + token_embd na CPU
+        n_layer + 1     → output + todos os blocos na GPU; token_embd na CPU
+        K >= n_layer+2  → tudo na GPU
+
+    Quando `output_mib == 0` mas `token_embd_mib > 0`, o modelo usa tied
+    embeddings (Gemma 3/4, alguns Phi) — o token_embd faz o papel da output.
+    Nesse caso ele segue a regra da output (vai pra GPU quando K >= 1) e o
+    patamar "+2" colapsa pro "+1".
+
+    Quando o tensor_info não pôde ser lido (token_embd_mib == 0) caímos pro
+    fallback proporcional (comportamento antigo).
+    """
+    if not meta or not meta.get("n_layer"):
+        return weights_total, 0
+    n_layer = meta["n_layer"]
+    if gpu_layers <= 0:
+        return 0, weights_total
+
+    token_embd = meta.get("token_embd_mib", 0) or 0
+    output_w   = meta.get("output_mib",      0) or 0
+    blocks_t   = meta.get("blocks_mib",      0) or 0
+
+    if token_embd <= 0 or blocks_t <= 0:
+        # Fallback: split proporcional (comportamento antigo). Conservador.
+        frac = 1.0 if gpu_layers >= n_layer else gpu_layers / n_layer
+        gpu = int(weights_total * frac)
+        return gpu, weights_total - gpu
+
+    # Tied embeddings: token_embd serve como output. Trata como se fosse a
+    # output layer (vai pra GPU quando K >= 1, sem patamar extra).
+    tied = output_w <= 0
+
+    # `weights_total` já tem o overhead aplicado em cima do tensor_total. Como
+    # o overhead se distribui uniforme entre os tensores, escalamos cada
+    # componente pela mesma razão pra preservar a soma total.
+    tensor_total = max(1, token_embd + output_w + blocks_t)
+    scale = weights_total / tensor_total
+    per_block_blocks = (blocks_t * scale) / n_layer
+    output_eff = output_w  * scale
+    token_eff  = token_embd * scale
+
+    gpu_blocks_count = (
+        n_layer if gpu_layers >= n_layer + 1
+        else max(0, gpu_layers - 1)
+    )
+    gpu_blocks = per_block_blocks * gpu_blocks_count
+    if tied:
+        # token_embd faz dupla função → vai pra GPU junto da output (K >= 1).
+        gpu_output = 0.0
+        gpu_token  = token_eff if gpu_layers >= 1 else 0.0
+    else:
+        gpu_output = output_eff if gpu_layers >= 1            else 0.0
+        gpu_token  = token_eff  if gpu_layers >= n_layer + 2  else 0.0
+
+    vram = int(gpu_blocks + gpu_output + gpu_token)
+    vram = min(vram, weights_total)
+    return vram, weights_total - vram
+
+
 def estimate_memory(
     model_path:     Path,
     backend:        str,
@@ -1845,8 +2051,18 @@ def estimate_memory(
 ) -> dict:
     """Estima componentes de VRAM/RAM (em MiB) para a config corrente."""
     meta        = _gguf_meta(model_path)
-    weights_mib = int(_model_disk_size_mib(model_path) * _WEIGHT_OVERHEAD)
-    mmproj_mib  = int((mmproj.stat().st_size // _MIB) * _WEIGHT_OVERHEAD) if mmproj else 0
+    # Quando temos tensor_total_mib do GGUF parsing, usar ele direto (sum exato
+    # dos tensores carregados). Senão usar o disk_size inflado pelo overhead.
+    if meta and meta.get("tensor_total_mib"):
+        weights_mib = int(meta["tensor_total_mib"] * _WEIGHT_OVERHEAD)
+    else:
+        weights_mib = int(_model_disk_size_mib(model_path) * _WEIGHT_OVERHEAD)
+
+    # mmproj: pesos vão pra VRAM no load; compute buffer é alocado em warmup.
+    # Em VRAM apertada o warmup do compute pode falhar silenciosamente — o
+    # servidor sobe pra texto mas estoura na 1ª imagem. Manter ambos no total.
+    mmproj_weights_mib = int((mmproj.stat().st_size // _MIB) * _WEIGHT_OVERHEAD) if mmproj else 0
+    mmproj_compute_mib = _MMPROJ_COMPUTE_MIB if mmproj else 0
 
     kv_eff, _    = remap_kv_for_backend(kv_cache, backend, mode)
     bytes_pe     = _KV_BYTES_PER_ELEM.get(kv_eff, 2.0)
@@ -1877,22 +2093,51 @@ def estimate_memory(
             ssm_state_mib = int(per_ssm * n_ssm * max(1, parallel_slots))
 
     n_layer  = meta["n_layer"] if meta else 0
-    gpu_frac = 1.0 if (not n_layer or gpu_layers >= n_layer) else max(0, gpu_layers) / n_layer
+    # Split exato GPU/CPU baseado nos tensores reais (ver _split_weights_by_ngl).
+    vram_weights, ram_weights = _split_weights_by_ngl(meta, weights_mib, gpu_layers)
+    # Fração ativa pra KV/SSM (que ainda escalam proporcional ao -ngl). Quando
+    # ngl == n_layer (todos os blocos repetitivos na GPU, output na GPU) usamos
+    # 1.0 porque o KV é compartilhado entre todos os blocos offloaded.
+    gpu_active = gpu_layers > 0
+    if not n_layer or gpu_layers >= n_layer:
+        gpu_frac_kv = 1.0
+    else:
+        gpu_frac_kv = max(0, gpu_layers) / n_layer
 
-    vram_weights = int(weights_mib  * gpu_frac)
-    vram_kv      = int(kv_total_mib * gpu_frac)
-    # Compute buffer cresce com o nº de slots paralelos (scratch de atenção por
-    # sequência) — ~220 MiB/slot extra, calibrado contra Qwen3.6 27B @ 4 slots.
-    vram_compute = (
-        int(_GPU_COMPUTE_BASE_MIB
+    vram_kv      = int(kv_total_mib * gpu_frac_kv)
+    vram_ssm     = int(ssm_state_mib * gpu_frac_kv)
+
+    # Compute buffer. Híbridos SSM (qwen35/qwen3next) usam fórmula linear-em-ctx
+    # dominada pelo scratch da DeltaNet; demais arquiteturas usam base+KV_coef.
+    is_ssm_hybrid = bool(meta and meta.get("ssm_state_per_layer_mib", 0))
+    if not gpu_active:
+        vram_compute = 0
+    elif is_ssm_hybrid:
+        vram_compute = int(
+            _GPU_COMPUTE_SSM_BASE_MIB
+            + _GPU_COMPUTE_SSM_PER_32K * (context_window / 32768)
+            + _GPU_COMPUTE_PARALLEL_MIB * max(0, parallel_slots - 1)
+        )
+    else:
+        vram_compute = int(
+            _GPU_COMPUTE_BASE_MIB
             + _GPU_COMPUTE_KV_COEF * bytes_pe
-            + _GPU_COMPUTE_PARALLEL_MIB * max(0, parallel_slots - 1))
-        if gpu_frac > 0 else 0
-    )
-    vram_ssm     = int(ssm_state_mib * gpu_frac)
-    vram_mmproj  = mmproj_mib           if gpu_frac > 0 else 0
+            + _GPU_COMPUTE_PARALLEL_MIB * max(0, parallel_slots - 1)
+        )
 
-    ram_weights  = weights_mib  - vram_weights
+    vram_mmproj_weights = mmproj_weights_mib if gpu_active else 0
+    vram_mmproj_compute = mmproj_compute_mib if gpu_active else 0
+    vram_mmproj         = vram_mmproj_weights + vram_mmproj_compute
+
+    # Contexto MTP de rascunho: segundo llama_context (1 layer + compute), só
+    # criado quando o backend mtp encontra um modelo MTP. Vive sempre na GPU.
+    vram_mtp_kv      = 0
+    vram_mtp_compute = 0
+    if (meta and gpu_active and backend == "mtp"
+            and is_mtp_model(model_path)):
+        vram_mtp_kv      = _mtp_draft_kv_mib(meta, context_window, bytes_pe_k, bytes_pe)
+        vram_mtp_compute = _MTP_DRAFT_COMPUTE_MIB
+
     ram_kv       = kv_total_mib - vram_kv
     ram_ssm      = ssm_state_mib - vram_ssm
     # --cache-ram é um TETO do prompt cache, não uma alocação: vale 0 no launch
@@ -1914,25 +2159,30 @@ def estimate_memory(
         ram_weights  += moe_offload_mib
 
     return {
-        "meta_ok":         meta is not None,
-        "weights_mib":     weights_mib,
-        "kv_total_mib":    kv_total_mib,
-        "mmproj_mib":      mmproj_mib,
-        "vram_weights":    vram_weights,
-        "vram_kv":         vram_kv,
-        "vram_compute":    vram_compute,
-        "vram_ssm":        vram_ssm,
-        "vram_mmproj":     vram_mmproj,
-        "ram_weights":     ram_weights,
-        "ram_kv":          ram_kv,
-        "ram_ssm":         ram_ssm,
-        "cache_ram":       cache_ram_mib,
-        "moe_offload_mib": moe_offload_mib,
-        "vram_total":      vram_weights + vram_kv + vram_compute + vram_ssm + vram_mmproj,
-        "ram_total":       ram_weights + ram_kv + ram_ssm,
-        "vram_avail":      _gpu_free_mib(),
-        "vram_total_phys": _gpu_total_mib(),
-        "ram_avail":       _ram_total_mib(),
+        "meta_ok":          meta is not None,
+        "weights_mib":      weights_mib,
+        "kv_total_mib":     kv_total_mib,
+        "mmproj_mib":       mmproj_weights_mib + mmproj_compute_mib,
+        "vram_weights":     vram_weights,
+        "vram_kv":          vram_kv,
+        "vram_compute":     vram_compute,
+        "vram_ssm":         vram_ssm,
+        "vram_mmproj":          vram_mmproj,
+        "vram_mmproj_weights":  vram_mmproj_weights,
+        "vram_mmproj_compute":  vram_mmproj_compute,
+        "vram_mtp_kv":      vram_mtp_kv,
+        "vram_mtp_compute": vram_mtp_compute,
+        "ram_weights":      ram_weights,
+        "ram_kv":           ram_kv,
+        "ram_ssm":          ram_ssm,
+        "cache_ram":        cache_ram_mib,
+        "moe_offload_mib":  moe_offload_mib,
+        "vram_total":       (vram_weights + vram_kv + vram_compute + vram_ssm
+                             + vram_mmproj + vram_mtp_kv + vram_mtp_compute),
+        "ram_total":        ram_weights + ram_kv + ram_ssm,
+        "vram_avail":       _gpu_free_mib(),
+        "vram_total_phys":  _gpu_total_mib(),
+        "ram_avail":        _ram_total_mib(),
     }
 
 
@@ -2014,9 +2264,21 @@ def show_memory_estimate(
     if verbose:
         moe_note = f" (ncmoe offload: {est['moe_offload_mib']} MiB)" if est.get("moe_offload_mib") else ""
         ssm_note = f" + ssm {est['vram_ssm']}" if est.get("vram_ssm") else ""
+        mtp_note = (
+            f" + mtp-draft {est['vram_mtp_kv'] + est['vram_mtp_compute']}"
+            if est.get("vram_mtp_kv") or est.get("vram_mtp_compute") else ""
+        )
+        # mmproj: mostra weights+compute separados pra deixar claro qual parte
+        # pode ser rejeitada silenciosamente no warmup (compute) e qual sempre
+        # fica em VRAM (weights).
+        mw, mc = est.get("vram_mmproj_weights", 0), est.get("vram_mmproj_compute", 0)
+        if mw or mc:
+            mmproj_note = f" + mmproj {mw}w+{mc}c"
+        else:
+            mmproj_note = ""
         print(
             f"   {_C_DIM}vram = pesos {est['vram_weights']} + kv {est['vram_kv']} "
-            f"+ compute {est['vram_compute']}{ssm_note} + mmproj {est['vram_mmproj']} MiB{moe_note}{_C_RESET}"
+            f"+ compute {est['vram_compute']}{ssm_note}{mmproj_note}{mtp_note} MiB{moe_note}{_C_RESET}"
         )
         print(
             f"   {_C_DIM}ram  = pesos {est['ram_weights']} + kv {est['ram_kv']} MiB{_C_RESET}"
@@ -2104,8 +2366,9 @@ def suggest_n_gpu_layers(
     """Maior `-ngl` cujo total de VRAM cabe em `target_vram_pct` da VRAM livre.
 
     Pra modelos densos, tirar camadas inteiras da GPU é o único jeito de
-    aliviar VRAM. Retorna n_layer (tudo na GPU) quando já cabe; 99 quando não
-    dá pra estimar (sem metadata ou VRAM desconhecida)."""
+    aliviar VRAM. O teto é `n_layer + 2` (tudo: blocos + output + token_embd);
+    `n_layer + 1` adiciona o último bloco e `n_layer` deixa output+embed na
+    CPU. Retorna 99 quando não dá pra estimar (sem metadata/VRAM)."""
     meta = _gguf_meta(model_path)
     if not meta:
         return 99
@@ -2114,7 +2377,7 @@ def suggest_n_gpu_layers(
     if not vram_avail:
         return 99
     budget = int(vram_avail * target_vram_pct)
-    for ngl in range(n_layer, -1, -1):
+    for ngl in range(n_layer + 2, -1, -1):
         est = estimate_memory(
             model_path, backend, context_window, parallel_slots,
             kv_cache, ngl, mmproj, cache_ram, mode,
@@ -2137,12 +2400,16 @@ def _ngl_menu_choices(
 ) -> list[questionary.Choice]:
     """Menu de -ngl com a projeção de VRAM de cada valor (cabe/estoura + RAM).
 
-    Mostra 'tudo na GPU', a sugestão e um passo mais folgado — cada opção já
-    estimada. A sugestão leva a marca [recomendado]."""
-    cands: set[int] = {n_layer, suggested}
+    Mostra a sugestão, um passo mais folgado, e os patamares de offload do
+    llama.cpp: K==n_layer deixa output+token_embd na CPU; K==n_layer+1 leva
+    output pra GPU; K==n_layer+2 leva também o token_embd. A sugestão leva
+    a marca [recomendado]."""
+    # Inclui os patamares-chave (n_layer, +1, +2) pra usuário ver o trade-off
+    # de mover output / token_embd pra GPU. O cap superior é n_layer+2.
+    cands: set[int] = {n_layer, n_layer + 1, n_layer + 2, suggested}
     if suggested > 0:
         cands.add(max(0, suggested - max(2, n_layer // 8)))
-    ordered = sorted((c for c in cands if 0 <= c <= n_layer), reverse=True)
+    ordered = sorted((c for c in cands if 0 <= c <= n_layer + 2), reverse=True)
 
     icons = {"ok": "🟢", "tight": "🟡", "overflow": "🔴", "unknown": "⚪"}
     out: list[questionary.Choice] = []
@@ -2152,12 +2419,19 @@ def _ngl_menu_choices(
             kv_cache, v, mmproj, cache_ram, mode,
         )
         status = _estimate_status(est)
-        on_ram = max(0, n_layer - v)
         avail  = est["vram_avail"] or 0
 
-        if on_ram == 0:
-            desc = "tudo na GPU"
+        # Descritor de offload: o que fica na CPU em cada patamar.
+        if v >= n_layer + 2:
+            desc = "tudo na GPU (+ output + token_embd)"
+        elif v == n_layer + 1:
+            desc = "blocos + output (token_embd p/ CPU)"
+        elif v == n_layer:
+            desc = "blocos (output + embed p/ CPU)"
+        elif v <= 0:
+            desc = "tudo na CPU"
         else:
+            on_ram = max(0, n_layer - v + 1)            # +1 bloco saindo
             unit = "camada" if on_ram == 1 else "camadas"
             desc = f"{on_ram} {unit} (~{est['ram_total']/1024:.1f} GB) p/ RAM"
 
@@ -2168,7 +2442,7 @@ def _ngl_menu_choices(
             tail = f"{icons[status]} cabe  {est['vram_total']/1024:.1f}/{avail/1024:.1f} GB"
 
         mark = "  [recomendado]" if v == suggested else ""
-        out.append(questionary.Choice(f"{v:>3}  —  {desc:<32}  {tail}{mark}", value=v))
+        out.append(questionary.Choice(f"{v:>3}  —  {desc:<38}  {tail}{mark}", value=v))
 
     out.append(questionary.Choice("  ✏  Digitar valor customizado...", value=-1))
     return out
@@ -2224,6 +2498,7 @@ def build_command(
     ctx_checkpoints:  int,
     n_cpu_moe:        int = 0,
     spec_draft_n_max: int = 2,
+    preserve_thinking: bool = False,
     mmproj:           Path | None = None,
     verbose:          bool = False,
 ) -> str:
@@ -2261,7 +2536,19 @@ def build_command(
     cmd += f' -n {max_tokens}'
 
     if reasoning_budget is not None:
-        cmd += f' --reasoning-budget {reasoning_budget}'
+        if reasoning_budget == 0:
+            cmd += ' --reasoning off'
+        else:
+            cmd += f' --reasoning-budget {reasoning_budget}'
+
+    # preserve_thinking: mantém os blocos <think> de turnos ANTERIORES no
+    # histórico renderizado. Sem isso, o template do Qwen3.x só preserva o
+    # raciocínio da rodada atual (assistant após a última msg do usuário) e
+    # descarta o resto. Só faz sentido com reasoning ligado — quem chama já
+    # garante isso. Aspas: cmd.exe repassa a linha; o CRT do llama-server faz
+    # o split de argv, então \" vira aspa literal e o JSON chega inteiro.
+    if preserve_thinking:
+        cmd += ' --chat-template-kwargs "{\\"preserve_thinking\\": true}"'
 
     if mlock:
         cmd += ' --mlock'
@@ -2275,13 +2562,6 @@ def build_command(
     # ocupar 6-8 GB em ctx 131k.
     cmd += f' --cache-ram {cache_ram}'
     cmd += f' --ctx-checkpoints {ctx_checkpoints}'
-
-    # Limita o pico de VRAM do CLIP encoder quando mmproj está ativo.
-    # Default em modelos Qwen-VL é ~4096 tokens (imagem 2048x2048) — estoura 24 GB
-    # em modelos 27B+. 2048 tokens ≈ 1448x1448, fica acima do mínimo de 1024
-    # que o Qwen-VL exige pra grounding e corta o pico do encoder pela metade.
-    if mmproj:
-        cmd += ' --image-max-tokens 2048'
 
     cmd += ' --jinja --metrics --host 0.0.0.0 --port 1234'
 
@@ -2336,7 +2616,10 @@ def build_cli_command(
     cmd += f' -n {max_tokens}'
 
     if reasoning_budget is not None:
-        cmd += f' --reasoning-budget {reasoning_budget}'
+        if reasoning_budget == 0:
+            cmd += ' --reasoning off'
+        else:
+            cmd += f' --reasoning-budget {reasoning_budget}'
 
     if mlock:
         cmd += ' --mlock'
@@ -2432,6 +2715,7 @@ def main():
         ctx_str = f"{ctx:,}" if isinstance(ctx, int) else ctx
         rb = prev_cfg.get('reasoning_budget')
         rb_str = str(rb) if rb is not None else "—"
+        pt_str = "on" if prev_cfg.get('preserve_thinking') else "off"
 
         cr = prev_cfg.get('cache_ram')
         cr_str = f"{cr} MiB" if cr is not None else "—"
@@ -2452,6 +2736,7 @@ def main():
         print(f"│  MLock           : {prev_cfg.get('mlock', '?')}")
         print(f"│  Max Tokens      : {prev_cfg.get('max_tokens', '?')}")
         print(f"│  Reasoning Budget: {rb_str}")
+        print(f"│  Preserve Think. : {pt_str}")
         print(f"│  Cache RAM       : {cr_str}")
         print(f"│  Ctx Checkpoints : {cc_str}")
         if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
@@ -2549,12 +2834,15 @@ def main():
             if _ngl_is_moe or not _ngl_n_layer:
                 gpu_layers = ask_int("🎮 Camadas na GPU (-ngl)", 99)
             else:
+                # Teto = n_layer + 2 (todos os blocos + output + token_embd).
+                # Acima disso o llama.cpp não offloada mais nada — então clampa
+                # a sugestão pra mostrar "tudo na GPU" como max no menu.
                 suggested_ngl = min(
                     suggest_n_gpu_layers(
                         model_path, backend, context_window, 1,
                         kv_cache, use_mmproj, 8_192, mode,
                     ),
-                    _ngl_n_layer,
+                    _ngl_n_layer + 2,
                 )
                 picked = questionary.select(
                     f"🎮 Camadas na GPU (-ngl):  denso · {_ngl_n_layer} camadas",
@@ -2672,7 +2960,7 @@ def main():
         if is_thinking_model(model_path):
             print()
             reasoning_budget = questionary.select(
-                "🧠 Reasoning budget (--reasoning-budget):",
+                "🧠 Reasoning / thinking  (0 = --reasoning off, N = --reasoning-budget N):",
                 choices=REASONING_BUDGET_CHOICES,
             ).ask()
 
@@ -2741,6 +3029,24 @@ def main():
         print(f"⚠️  {warning}")
         kv_cache = new_kv
 
+    # ── preserve_thinking ────────────────────────────────────────────────────
+    # Liga --chat-template-kwargs '{"preserve_thinking": true}' automaticamente
+    # quando as três condições batem:
+    #   1. modo server (só ali entra --jinja, que o kwarg exige);
+    #   2. reasoning ligado (budget != None e != 0 — sem <think>, não há o que
+    #      preservar);
+    #   3. o template do modelo realmente expõe a variável `preserve_thinking`.
+    # O binário ainda é checado via --help; se faltar suporte, o auto-degrade
+    # remove a flag na primeira queda.
+    preserve_thinking = False
+    if mode == "server" and reasoning_budget not in (None, 0):
+        _pt_meta = _gguf_meta(model_path)
+        if (_pt_meta and _pt_meta.get("supports_preserve_thinking")
+                and _backend_supports_chat_template_kwargs(backend, "server")):
+            preserve_thinking = True
+            print("   🧠 preserve_thinking: ON — o histórico vai manter os blocos "
+                  "<think> de turnos anteriores (--chat-template-kwargs).")
+
     # ── salva configuração ───────────────────────────────────────────────────
     cfg = {
         "model":          str(model_path),
@@ -2752,6 +3058,7 @@ def main():
         "n_cpu_moe":      n_cpu_moe,
         "parallel_slots": parallel_slots,
         "reasoning_budget": reasoning_budget,
+        "preserve_thinking": preserve_thinking,
         "mlock":          mlock,
         "max_tokens":     max_tokens,
         "batch_size":     batch_size,
@@ -2789,6 +3096,7 @@ def main():
             ctx_checkpoints=ctx_checkpoints,
             n_cpu_moe=n_cpu_moe,
             spec_draft_n_max=spec_draft_n_max,
+            preserve_thinking=preserve_thinking,
             mmproj=use_mmproj,
             verbose=verbose,
         )
@@ -2836,6 +3144,8 @@ def main():
         print(f"   n: {max_tokens}  |  {img_status}  |  {verbose_status}")
     if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
         print(f"   spec-mtp: draft-mtp  |  spec-draft-n-max: {spec_draft_n_max}")
+    if preserve_thinking:
+        print('   chat-template-kwargs: {"preserve_thinking": true}')
     print()
     print(f"   {cmd}\n")
 
