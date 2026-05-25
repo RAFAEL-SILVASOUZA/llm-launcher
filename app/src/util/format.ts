@@ -6,9 +6,11 @@ export function fmtMiB(mib: number | null | undefined): string {
   return `${mib} MiB`;
 }
 
+// Mostra o valor cru do context window com separador de milhar. Notação "k"
+// (base 1024) confunde porque 131072 = 128k exato — usuário que digitou
+// "131072" enxergava "128k" e parecia arredondamento.
 export function fmtCtx(ctx: number): string {
-  if (ctx >= 1024) return `${(ctx / 1024).toFixed(0)}k`;
-  return String(ctx);
+  return ctx.toLocaleString();
 }
 
 export function fmtPct(num: number, denom: number | null | undefined): string {

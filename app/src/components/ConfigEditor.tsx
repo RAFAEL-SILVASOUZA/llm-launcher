@@ -1,3 +1,4 @@
+import { Rocket } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type {
@@ -188,10 +189,10 @@ export function ConfigEditor({
           <button
             onClick={() => handleSave("launch")}
             disabled={!cfg.model || saving || !backend?.server_available}
-            className="px-3 py-1.5 text-sm rounded bg-accent hover:bg-accent/80 text-white disabled:opacity-50"
+            className="px-3 py-1.5 text-sm rounded bg-accent hover:bg-accent/80 text-white disabled:opacity-50 flex items-center gap-1"
             title={!backend?.server_available ? "binário do backend não encontrado" : ""}
           >
-            ▶ Salvar e launch
+            <Rocket className="w-3 h-3" />Salvar e launch
           </button>
         </>
       }
