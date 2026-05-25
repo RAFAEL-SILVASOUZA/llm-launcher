@@ -28,6 +28,7 @@ declare global {
   interface Window {
     electronAPI?: {
       getApiBaseUrl: () => Promise<string>;
+      getPythonLogPath?: () => Promise<string | null>;
     };
   }
 }

@@ -9,4 +9,5 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("electronAPI", {
   getApiBaseUrl: () => ipcRenderer.invoke("api:base-url"),
+  getPythonLogPath: () => ipcRenderer.invoke("app:python-log-path"),
 });
