@@ -1,14 +1,36 @@
 import { useEffect, useState } from "react";
-import { FolderPlus, Trash2, Save, Loader2, FolderOpen, AlertTriangle } from "lucide-react";
+import { FolderPlus, Trash2, Save, Loader2, FolderOpen, AlertTriangle, Cpu, RotateCcw } from "lucide-react";
 import { api } from "../api/client";
 
 type Props = {
   onSaved: () => void;
 };
 
+type BackendKey = "turbo" | "vanilla" | "mtp";
+const BACKEND_KEYS: BackendKey[] = ["turbo", "vanilla", "mtp"];
+
+const BACKEND_LABEL: Record<BackendKey, string> = {
+  turbo:   "turbo (turboquant)",
+  vanilla: "vanilla (upstream)",
+  mtp:     "mtp (am17an / MTP speculative)",
+};
+
 export function SettingsPage({ onSaved }: Props) {
   const [paths, setPaths] = useState<string[]>([]);
   const [original, setOriginal] = useState<string[]>([]);
+
+  // Diretórios por backend — sempre 3 entradas (turbo/vanilla/mtp). Valor
+  // vazio = usa o default exibido como placeholder.
+  const [backendDirs, setBackendDirs] = useState<Record<BackendKey, string>>({
+    turbo: "", vanilla: "", mtp: "",
+  });
+  const [originalBackendDirs, setOriginalBackendDirs] = useState<Record<BackendKey, string>>({
+    turbo: "", vanilla: "", mtp: "",
+  });
+  const [backendDefaults, setBackendDefaults] = useState<Record<BackendKey, string>>({
+    turbo: "", vanilla: "", mtp: "",
+  });
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,6 +43,12 @@ export function SettingsPage({ onSaved }: Props) {
         const list = s.model_paths.length > 0 ? s.model_paths : [""];
         setPaths(list);
         setOriginal(s.model_paths);
+
+        const cur: Record<BackendKey, string> = { turbo: "", vanilla: "", mtp: "" };
+        for (const k of BACKEND_KEYS) cur[k] = s.backend_paths[k] ?? "";
+        setBackendDirs(cur);
+        setOriginalBackendDirs(cur);
+        setBackendDefaults(s.backend_paths_defaults);
       } catch (e) {
         setError((e as Error).message);
       } finally {
@@ -29,9 +57,15 @@ export function SettingsPage({ onSaved }: Props) {
     })();
   }, []);
 
-  const dirty =
+  const pathsDirty =
     paths.length !== original.length ||
     paths.some((p, i) => p !== original[i]);
+
+  const backendsDirty = BACKEND_KEYS.some(
+    (k) => backendDirs[k].trim() !== originalBackendDirs[k].trim(),
+  );
+
+  const dirty = pathsDirty || backendsDirty;
 
   const updatePath = (i: number, v: string) => {
     setPaths((prev) => prev.map((p, idx) => (idx === i ? v : p)));
@@ -43,14 +77,37 @@ export function SettingsPage({ onSaved }: Props) {
     setPaths((prev) => prev.filter((_, idx) => idx !== i));
   };
 
+  const updateBackendDir = (k: BackendKey, v: string) => {
+    setBackendDirs((prev) => ({ ...prev, [k]: v }));
+  };
+
+  const resetBackendDir = (k: BackendKey) => {
+    setBackendDirs((prev) => ({ ...prev, [k]: "" }));
+  };
+
   const handleSave = async () => {
     setSaving(true);
     setError(null);
     try {
-      const cleaned = paths.map((p) => p.trim()).filter((p) => p.length > 0);
-      const saved = await api.saveSettings({ model_paths: cleaned });
+      const cleanedPaths = paths.map((p) => p.trim()).filter((p) => p.length > 0);
+      const cleanedBackends: Partial<Record<BackendKey, string>> = {};
+      for (const k of BACKEND_KEYS) {
+        const v = backendDirs[k].trim();
+        if (v) cleanedBackends[k] = v;
+      }
+      const saved = await api.saveSettings({
+        model_paths:   cleanedPaths,
+        backend_paths: cleanedBackends,
+      });
       setOriginal(saved.model_paths);
       setPaths(saved.model_paths.length > 0 ? saved.model_paths : [""]);
+
+      const nextBackends: Record<BackendKey, string> = { turbo: "", vanilla: "", mtp: "" };
+      for (const k of BACKEND_KEYS) nextBackends[k] = saved.backend_paths[k] ?? "";
+      setBackendDirs(nextBackends);
+      setOriginalBackendDirs(nextBackends);
+      setBackendDefaults(saved.backend_paths_defaults);
+
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 1500);
       onSaved();
@@ -80,7 +137,8 @@ export function SettingsPage({ onSaved }: Props) {
         )}
       </div>
 
-      <div className="p-4 space-y-4">
+      <div className="p-4 space-y-6">
+        {/* ── Pastas de modelos ────────────────────────────────────────── */}
         <div>
           <div className="flex items-center gap-2 mb-1">
             <FolderOpen className="w-4 h-4 text-ink-400" />
@@ -117,7 +175,7 @@ export function SettingsPage({ onSaved }: Props) {
           )}
         </ul>
 
-        <div className="flex items-center gap-2">
+        <div>
           <button
             onClick={addPath}
             className="text-xs px-2.5 py-1.5 rounded bg-ink-800 hover:bg-ink-700 text-ink-200 flex items-center gap-1"
@@ -125,6 +183,55 @@ export function SettingsPage({ onSaved }: Props) {
             <FolderPlus className="w-3.5 h-3.5" />
             adicionar caminho
           </button>
+        </div>
+
+        {/* ── Pastas dos binários llama.cpp ───────────────────────────── */}
+        <div className="pt-2 border-t border-ink-800">
+          <div className="flex items-center gap-2 mb-1 mt-3">
+            <Cpu className="w-4 h-4 text-ink-400" />
+            <h3 className="text-sm font-medium text-ink-100">Diretórios dos binários llama.cpp</h3>
+          </div>
+          <p className="text-xs text-ink-500">
+            Pasta que contém <span className="mono">llama-server.exe</span> e <span className="mono">llama-cli.exe</span> de cada backend.
+            Deixe vazio para usar o default.
+          </p>
+        </div>
+
+        <ul className="space-y-3">
+          {BACKEND_KEYS.map((k) => {
+            const def = backendDefaults[k] ?? "";
+            const cur = backendDirs[k];
+            const usingDefault = cur.trim().length === 0;
+            return (
+              <li key={k} className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-ink-300 w-44 shrink-0">{BACKEND_LABEL[k]}</span>
+                  <input
+                    type="text"
+                    value={cur}
+                    onChange={(e) => updateBackendDir(k, e.target.value)}
+                    placeholder={def}
+                    className="flex-1 bg-ink-950 border border-ink-700 rounded px-3 py-1.5 text-sm mono focus:outline-none focus:border-accent"
+                  />
+                  <button
+                    onClick={() => resetBackendDir(k)}
+                    disabled={usingDefault}
+                    title="usar default"
+                    className="text-xs px-2 py-1.5 rounded bg-ink-800 hover:bg-ink-700 text-ink-300 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                  </button>
+                </div>
+                <div className="text-[11px] text-ink-500 pl-46 mono truncate" title={def}>
+                  {usingDefault ? <>usando default: {def}</> : <>default: {def}</>}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+
+        {/* ── Save / erros ────────────────────────────────────────────── */}
+        <div className="flex items-center gap-2 pt-2 border-t border-ink-800">
           <div className="flex-1" />
           <button
             onClick={handleSave}

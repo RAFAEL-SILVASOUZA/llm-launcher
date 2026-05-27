@@ -1,17 +1,24 @@
 """Persistência de configurações da app (não-launch).
 
-Hoje guarda só `model_paths` — lista de pastas onde varremos GGUF. O default
-(quando o arquivo não existe ou está vazio) é a pasta padrão do LM Studio
-em `MODELS_DIR`. Salvar pela UI sobrescreve.
+Guarda hoje:
+  - `model_paths`: pastas para varrer .gguf (fallback: MODELS_DIR).
+  - `backend_paths`: override do diretório dos binários por backend
+    (turbo/vanilla/mtp). Quando vazio/ausente, cai pro hardcoded default em
+    constants.BACKENDS — pra que o app continue funcionando se o usuário
+    nunca configurou.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from .constants import CONFIG_FILE, MODELS_DIR
+from .constants import BACKENDS, CONFIG_FILE, MODELS_DIR
 
 SETTINGS_FILE = CONFIG_FILE.with_name("app_settings.json")
+
+# Backends cujo diretório o usuário pode customizar pela UI. Mantemos fixo —
+# adicionar/remover backend continua sendo mudança de código.
+CONFIGURABLE_BACKENDS = tuple(BACKENDS.keys())
 
 
 def _read_raw(path: Path = SETTINGS_FILE) -> dict:
@@ -47,11 +54,39 @@ def get_scan_paths(path: Path = SETTINGS_FILE) -> list[Path]:
 get_model_paths = get_scan_paths
 
 
+def _read_backend_paths(path: Path = SETTINGS_FILE) -> dict[str, str]:
+    """Dict {backend: dir} apenas com os explicitamente configurados."""
+    raw = _read_raw(path).get("backend_paths")
+    out: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for name in CONFIGURABLE_BACKENDS:
+            v = raw.get(name)
+            if isinstance(v, str) and v.strip():
+                out[name] = v.strip()
+    return out
+
+
+def get_backend_dir(backend: str, path: Path = SETTINGS_FILE) -> Path | None:
+    """Diretório dos binários daquele backend, se configurado pelo usuário."""
+    raw = _read_backend_paths(path).get(backend)
+    return Path(raw) if raw else None
+
+
+def default_backend_dir(backend: str) -> Path:
+    """Diretório default (parent do binário em constants.BACKENDS).
+    Assumimos server e cli no mesmo diretório — é o layout do CMake build."""
+    return BACKENDS[backend]["server"].parent
+
+
 def read_settings(path: Path = SETTINGS_FILE) -> dict:
     """Snapshot para o frontend — devolve só o que está realmente configurado,
     pra UI distinguir 'não configurado' de 'usando default'."""
     return {
-        "model_paths": [str(p) for p in get_configured_paths(path)],
+        "model_paths":            [str(p) for p in get_configured_paths(path)],
+        "backend_paths":          _read_backend_paths(path),
+        "backend_paths_defaults": {
+            name: str(default_backend_dir(name)) for name in CONFIGURABLE_BACKENDS
+        },
     }
 
 
@@ -69,6 +104,16 @@ def save_settings(data: dict, path: Path = SETTINGS_FILE) -> dict:
             seen.add(s)
             cleaned.append(s)
         current["model_paths"] = cleaned
+
+    raw_backends = data.get("backend_paths")
+    if isinstance(raw_backends, dict):
+        out: dict[str, str] = {}
+        for name in CONFIGURABLE_BACKENDS:
+            v = raw_backends.get(name)
+            if isinstance(v, str) and v.strip():
+                out[name] = v.strip()
+        current["backend_paths"] = out
+
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")

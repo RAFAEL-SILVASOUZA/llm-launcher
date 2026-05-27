@@ -1,25 +1,56 @@
-import { useEffect, useState } from "react";
-import { Cpu, RotateCcw, Loader2, AlertTriangle, Thermometer, Activity, Zap, MemoryStick } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Cpu, RotateCcw, Loader2, AlertTriangle, Thermometer, Activity, Zap, MemoryStick, LineChart, HardDrive } from "lucide-react";
 import { api } from "../api/client";
-import type { NvidiaStatus } from "../api/types";
+import type { NvidiaStatus, SystemInfo } from "../api/types";
+
+// Janela rolante de histórico: 60 amostras × 2 s = 2 min visíveis nos gráficos.
+const HISTORY_LEN = 60;
+
+type Sample = { vramPct: number; gpuPct: number; ramPct: number };
 
 // Dashboard de GPU NVIDIA: roda nvidia-smi a cada 2 s, mostra cada GPU
-// detectada com sensores em cards.
+// detectada com sensores em cards + mini-gráficos de VRAM/GPU à direita.
 export function NvidiaPage() {
   const [status, setStatus] = useState<NvidiaStatus | null>(null);
   const [error, setError]   = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [loading, setLoading] = useState(true);
+  // Histórico por índice de GPU; mantido em ref pra não disparar re-render
+  // duplicado (escrevemos junto com status no mesmo tick).
+  const [history, setHistory] = useState<Record<number, Sample[]>>({});
+  const historyRef = useRef(history);
+  historyRef.current = history;
 
   useEffect(() => {
     let cancelled = false;
     async function tick() {
       try {
-        const s = await api.nvidia();
-        if (!cancelled) {
-          setStatus(s);
-          setError(null);
-          setLoading(false);
+        // Pega nvidia-smi e RAM no mesmo tick — se um falhar, o outro ainda
+        // aparece. system() é barato no backend (cache de 2 s).
+        const [s, sys] = await Promise.all([
+          api.nvidia(),
+          api.system().catch(() => null as SystemInfo | null),
+        ]);
+        if (cancelled) return;
+        setStatus(s);
+        setError(null);
+        setLoading(false);
+        if (s.available) {
+          const ramTotal = sys?.ram_total_mib ?? 0;
+          const ramAvail = sys?.ram_avail_mib ?? 0;
+          const ramPct   = ramTotal > 0 ? ((ramTotal - ramAvail) / ramTotal) * 100 : 0;
+          const next: Record<number, Sample[]> = { ...historyRef.current };
+          s.gpus.forEach((g, i) => {
+            const memTotal = parseFloat(g["memory.total"] ?? "0");
+            const memUsed  = parseFloat(g["memory.used"]  ?? "0");
+            const vramPct  = memTotal > 0 ? (memUsed / memTotal) * 100 : 0;
+            const gpuPct   = parseFloat(g["utilization.gpu"] ?? "0") || 0;
+            const prev = next[i] ?? [];
+            const updated = prev.concat({ vramPct, gpuPct, ramPct });
+            if (updated.length > HISTORY_LEN) updated.splice(0, updated.length - HISTORY_LEN);
+            next[i] = updated;
+          });
+          setHistory(next);
         }
       } catch (e) {
         if (!cancelled) {
@@ -81,8 +112,13 @@ export function NvidiaPage() {
         )}
 
         {status && status.available && (
-          <div className="grid gap-4 md:grid-cols-2">
-            {status.gpus.map((gpu, i) => <GpuCard key={i} gpu={gpu} />)}
+          <div className="space-y-4">
+            {status.gpus.map((gpu, i) => (
+              <div key={i} className="grid gap-4 lg:grid-cols-2">
+                <GpuCard gpu={gpu} />
+                <GpuCharts history={history[i] ?? []} />
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -143,6 +179,129 @@ function GpuCard({ gpu }: { gpu: Record<string, string> }) {
         <Stat icon={<Activity className="w-3 h-3 text-purple-400" />} label="Clock Mem" value={clkMem} />
       </div>
     </div>
+  );
+}
+
+function GpuCharts({ history }: { history: Sample[] }) {
+  const vram = history.map((s) => s.vramPct);
+  const gpu  = history.map((s) => s.gpuPct);
+  const ram  = history.map((s) => s.ramPct);
+  const lastVram = vram.length ? vram[vram.length - 1] : 0;
+  const lastGpu  = gpu.length  ? gpu[gpu.length - 1]  : 0;
+  const lastRam  = ram.length  ? ram[ram.length - 1]  : 0;
+  // 2 s por amostra; horizonte é histórico real, não a janela cheia.
+  const seconds  = history.length * 2;
+
+  return (
+    <div className="bg-ink-950 border border-ink-800 rounded p-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="font-medium text-ink-100 flex items-center gap-2 text-sm">
+          <LineChart className="w-4 h-4 text-accent-fg" /> Histórico
+        </h3>
+        <span className="text-[11px] text-ink-500 mono">
+          {history.length === 0 ? "aguardando dados…" : `últimos ${seconds}s · ${history.length} amostras`}
+        </span>
+      </div>
+
+      <ChartRow
+        label="VRAM"
+        icon={<MemoryStick className="w-3 h-3" />}
+        values={vram}
+        last={lastVram}
+        color="#10b981"
+        fill="#10b98133"
+      />
+      <ChartRow
+        label="GPU"
+        icon={<Activity className="w-3 h-3" />}
+        values={gpu}
+        last={lastGpu}
+        color="#06b6d4"
+        fill="#06b6d433"
+      />
+      <ChartRow
+        label="RAM"
+        icon={<HardDrive className="w-3 h-3" />}
+        values={ram}
+        last={lastRam}
+        color="#a78bfa"
+        fill="#a78bfa33"
+      />
+    </div>
+  );
+}
+
+function ChartRow({
+  label, icon, values, last, color, fill,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  values: number[];
+  last: number;
+  color: string;
+  fill: string;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs mb-1">
+        <span className="text-ink-300 flex items-center gap-1">{icon} {label}</span>
+        <span className="mono tabular-nums text-ink-200">{last.toFixed(0)}%</span>
+      </div>
+      <Sparkline values={values} color={color} fill={fill} />
+    </div>
+  );
+}
+
+// SVG sparkline 0–100%. Usa viewBox pra largura responsiva; altura fixa em
+// 56 px. Quando a série tá vazia, devolve um quadro vazio com gridlines pra
+// não pular de altura quando começarem a chegar amostras.
+function Sparkline({ values, color, fill }: { values: number[]; color: string; fill: string }) {
+  const w = 320;
+  const h = 56;
+  const pad = 4;
+  const max = 100;
+
+  const innerW = w - 2 * pad;
+  const innerH = h - 2 * pad;
+
+  const N = Math.max(values.length, 2);
+  const dx = innerW / (N - 1);
+
+  const points = values.length === 0
+    ? []
+    : values.map((v, i) => {
+        const x = pad + i * dx;
+        const y = pad + innerH * (1 - Math.max(0, Math.min(max, v)) / max);
+        return [x, y] as const;
+      });
+
+  const linePoints = points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const areaPoints = points.length > 0
+    ? `${pad},${h - pad} ${linePoints} ${(pad + (points.length - 1) * dx).toFixed(1)},${h - pad}`
+    : "";
+
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      className="w-full h-14 bg-ink-900/40 border border-ink-800 rounded"
+    >
+      {/* gridlines 25/50/75% */}
+      {[0.25, 0.5, 0.75].map((g) => (
+        <line
+          key={g}
+          x1={pad} x2={w - pad}
+          y1={pad + innerH * (1 - g)} y2={pad + innerH * (1 - g)}
+          stroke="#1f2937" strokeWidth="0.5" strokeDasharray="2,3"
+        />
+      ))}
+      {points.length > 0 && (
+        <>
+          <polygon points={areaPoints} fill={fill} />
+          <polyline points={linePoints} fill="none" stroke={color} strokeWidth="1.5" />
+        </>
+      )}
+    </svg>
   );
 }
 

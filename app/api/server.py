@@ -191,7 +191,8 @@ def list_models():
 # ─── routes: app settings (paths das pastas de modelos, etc.) ─────────────────
 
 class SettingsPayload(BaseModel):
-    model_paths: list[str] = Field(default_factory=list)
+    model_paths:   list[str]      = Field(default_factory=list)
+    backend_paths: dict[str, str] = Field(default_factory=dict)
 
 
 @app.get("/api/settings")
@@ -201,7 +202,11 @@ def get_settings():
 
 @app.post("/api/settings")
 def update_settings(payload: SettingsPayload):
-    return settings_store.save_settings(payload.model_dump())
+    saved = settings_store.save_settings(payload.model_dump())
+    # Os caches de --help / kv_types do backends_mod são por (backend, mode);
+    # se o usuário trocou o diretório do binário, os caches ficam stale.
+    backends_mod.invalidate_caches()
+    return saved
 
 
 class MetaRequest(BaseModel):

@@ -227,7 +227,11 @@ export const api = {
 
   // ─── app settings ────────────────────────────────────────────────────
   getSettings: () => jsonFetch<AppSettings>("/api/settings"),
-  saveSettings: (settings: AppSettings) =>
+  // Só envia os campos editáveis — backend_paths_defaults é read-only.
+  saveSettings: (settings: {
+    model_paths: string[];
+    backend_paths: Partial<Record<"turbo" | "vanilla" | "mtp", string>>;
+  }) =>
     jsonFetch<AppSettings>("/api/settings", {
       method: "POST",
       body: JSON.stringify(settings),

@@ -32,6 +32,8 @@ export type BackendStatus = {
   supports_spec_mtp: boolean;
   kv_types_server: string[];
   kv_types_cli: string[];
+  default_dir: string;
+  configured_dir: string;
 };
 
 export type SystemInfo = {
@@ -207,6 +209,10 @@ export type LmsStatus = {
 
 export type AppSettings = {
   model_paths: string[];
+  // Override do diretório dos binários por backend. Chave ausente / valor
+  // vazio = usa o default em backend_paths_defaults.
+  backend_paths: Partial<Record<"turbo" | "vanilla" | "mtp", string>>;
+  backend_paths_defaults: Record<"turbo" | "vanilla" | "mtp", string>;
 };
 
 export type LmsLoadResult = {

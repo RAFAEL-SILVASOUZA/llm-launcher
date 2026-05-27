@@ -9,10 +9,19 @@ import re
 import subprocess
 from pathlib import Path
 
+from . import settings_store
 from .constants import BACKENDS
 
 _BACKEND_HELP_CACHE: dict[tuple[str, str], str] = {}
 _KV_TYPES_CACHE: dict[tuple[str, str], set[str]] = {}
+
+
+def invalidate_caches() -> None:
+    """Chame quando os diretórios de backend mudarem em settings — o probe de
+    --help e os KV types vêm do binário, então caches por (backend, mode)
+    ficam stale se o usuário troca o build."""
+    _BACKEND_HELP_CACHE.clear()
+    _KV_TYPES_CACHE.clear()
 
 KV_TYPES_FALLBACK: dict[str, set[str]] = {
     "turbo":   {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1","turbo2","turbo3","turbo4"},
@@ -40,8 +49,17 @@ KV_TIER_ORDER = [
 
 
 def backend_binary(backend: str, mode: str) -> Path:
-    """Caminho do binário pro par (backend, mode)."""
-    return BACKENDS[backend]["server" if mode == "server" else "cli"]
+    """Caminho do binário pro par (backend, mode).
+
+    Resolve a partir de settings: se o usuário configurou um diretório custom
+    pro backend, usa esse + o nome do binário hardcoded (preserva
+    `llama-server.exe`/`llama-cli.exe`). Caso contrário, default do constants.
+    """
+    default = BACKENDS[backend]["server" if mode == "server" else "cli"]
+    custom_dir = settings_store.get_backend_dir(backend)
+    if custom_dir is not None:
+        return custom_dir / default.name
+    return default
 
 
 def backend_help_text(backend: str, mode: str) -> str:
@@ -142,8 +160,10 @@ def backend_status() -> list[dict]:
     """Estado de cada backend pro frontend: binários presentes, kv types."""
     out: list[dict] = []
     for name, b in BACKENDS.items():
-        server_path = b["server"]
-        cli_path    = b["cli"]
+        server_path = backend_binary(name, "server")
+        cli_path    = backend_binary(name, "cli")
+        default_dir = settings_store.default_backend_dir(name)
+        custom_dir  = settings_store.get_backend_dir(name)
         out.append({
             "name":              name,
             "label":             b["label"],
@@ -155,6 +175,8 @@ def backend_status() -> list[dict]:
             "supports_spec_mtp": b["supports_spec_mtp"],
             "kv_types_server":   sorted(probe_kv_types(name, "server")) if server_path.exists() else [],
             "kv_types_cli":      sorted(probe_kv_types(name, "cli")) if cli_path.exists() else [],
+            "default_dir":       str(default_dir),
+            "configured_dir":    str(custom_dir) if custom_dir is not None else "",
         })
     return out
 
