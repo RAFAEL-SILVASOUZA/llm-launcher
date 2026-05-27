@@ -1,9 +1,9 @@
 """Classificação de falhas do llama-server e escada de auto-degrade.
 
 Cada queda do servidor é classificada por categoria (OOM_LOAD, OOM_RUNTIME,
-KV_TYPE_REJECTED, UNSUPPORTED_FLAG, MMPROJ, UNKNOWN), e next_degrade aplica
-o próximo passo na escada — preservando velocidade/qualidade até onde der,
-sem mexer no context window (decisão do usuário).
+KV_TYPE_REJECTED, UNSUPPORTED_FLAG, MMPROJ, MODEL_CORRUPTED, UNKNOWN), e
+next_degrade aplica o próximo passo na escada — preservando velocidade/
+qualidade até onde der, sem mexer no context window (decisão do usuário).
 """
 import re
 
@@ -11,6 +11,7 @@ from .backends import next_kv_tier, remap_kv_for_backend
 from .constants import (
     KV_REJECTED_PATTERNS,
     MMPROJ_ERROR_PATTERNS,
+    MODEL_CORRUPTED_PATTERNS,
     OOM_PATTERNS,
     UNSUPPORTED_FLAG_PATTERNS,
 )
@@ -22,6 +23,7 @@ class Failure:
     UNSUPPORTED_FLAG = "UNSUPPORTED_FLAG"
     KV_TYPE_REJECTED = "KV_TYPE_REJECTED"
     MMPROJ           = "MMPROJ"
+    MODEL_CORRUPTED  = "MODEL_CORRUPTED"
     UNKNOWN          = "UNKNOWN"
 
 
@@ -43,6 +45,10 @@ def classify_failure(output: str, rc: int, load_ts: float | None) -> tuple[str, 
                     return ln.strip()
         return ""
 
+    # MODEL_CORRUPTED antes de tudo: se o arquivo tá quebrado, mmproj/kv/oom
+    # podem aparecer no mesmo log como sintomas secundários — não confundir.
+    if any(p in low for p in MODEL_CORRUPTED_PATTERNS):
+        return Failure.MODEL_CORRUPTED, first_match(MODEL_CORRUPTED_PATTERNS)
     if any(p in low for p in MMPROJ_ERROR_PATTERNS):
         return Failure.MMPROJ, first_match(MMPROJ_ERROR_PATTERNS)
     if any(p in low for p in KV_REJECTED_PATTERNS):

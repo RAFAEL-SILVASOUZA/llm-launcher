@@ -216,6 +216,14 @@ def run_server_resiliently(
                       "hint": "lms_fallback_available"})
             return
 
+        # Arquivo corrompido / shard faltando: auto-degrade não consegue
+        # consertar. Dá giveup direto com hint pro usuário rebaixar o quant.
+        if failure == Failure.MODEL_CORRUPTED:
+            append_fail_history(attempt_cfg, failure, excerpt, None, attempt)
+            on_event({"type": "giveup", "reason": "model_corrupted",
+                      "excerpt": excerpt, "hint": "redownload_model"})
+            return
+
         new_cfg, degrade_desc = next_degrade(cfg, failure, excerpt)
         append_fail_history(attempt_cfg, failure, excerpt, degrade_desc, attempt)
 

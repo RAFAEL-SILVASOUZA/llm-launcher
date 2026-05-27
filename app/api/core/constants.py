@@ -69,6 +69,15 @@ KV_REJECTED_PATTERNS = (
     "unsupported cache type",
     "unknown cache type",
 )
+# GGUF corrompido / shard faltando / tensor fora dos bounds — caso típico:
+# download interrompido de modelo split (`-NNNNN-of-NNNNN.gguf`). Auto-degrade
+# não conserta isso, só atrapalha — classificar separado pra dar giveup direto.
+MODEL_CORRUPTED_PATTERNS = (
+    "data is not within the file bounds",
+    "model is corrupted or incomplete",
+    "tensor data is corrupted",
+    "gguf_init_from_file: invalid magic number",
+)
 UNSUPPORTED_FLAG_PATTERNS = (
     "unknown argument:",
     "unrecognized argument:",
