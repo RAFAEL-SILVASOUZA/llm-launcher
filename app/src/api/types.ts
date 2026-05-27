@@ -205,6 +205,10 @@ export type LmsStatus = {
   error?: string;
 };
 
+export type AppSettings = {
+  model_paths: string[];
+};
+
 export type LmsLoadResult = {
   ok: boolean;
   key?: string;

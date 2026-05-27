@@ -8,7 +8,7 @@
  *     a URL do Vite. Em prod (build), carrega dist/index.html.
  *   • Mata o subprocesso quando todas as janelas fecham.
  */
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require("electron");
 const path = require("path");
 const fs   = require("fs");
 const { spawn } = require("child_process");
@@ -182,6 +182,9 @@ ipcMain.handle("api:base-url", async () => {
 ipcMain.handle("app:python-log-path", () => pythonLogPath);
 
 app.whenReady().then(() => {
+  // Sem barra de menu nativa (File/Edit/View/Window/Help) — a app não usa
+  // nenhuma das ações default e elas só poluem a UI.
+  Menu.setApplicationMenu(null);
   startApiServer();
   createWindow();
 

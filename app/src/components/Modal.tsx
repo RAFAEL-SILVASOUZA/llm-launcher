@@ -9,21 +9,29 @@ type Props = {
   width?: string;
   footer?: ReactNode;
   closable?: boolean;
+  // Opt-outs pra modais "deliberadas" (ex: editor de config) onde Esc ou
+  // clique fora podem descartar dados sem o usuário perceber. Default mantém
+  // comportamento histórico.
+  closeOnEsc?: boolean;
+  closeOnBackdrop?: boolean;
 };
 
-export function Modal({ open, onClose, title, children, width = "max-w-3xl", footer, closable = true }: Props) {
+export function Modal({
+  open, onClose, title, children, width = "max-w-3xl", footer,
+  closable = true, closeOnEsc = true, closeOnBackdrop = true,
+}: Props) {
   useEffect(() => {
-    if (!open || !closable) return;
+    if (!open || !closable || !closeOnEsc) return;
     const h = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     document.addEventListener("keydown", h);
     return () => document.removeEventListener("keydown", h);
-  }, [open, onClose, closable]);
+  }, [open, onClose, closable, closeOnEsc]);
 
   if (!open) return null;
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-      onClick={closable ? onClose : undefined}
+      onClick={closable && closeOnBackdrop ? onClose : undefined}
     >
       <div
         className={`${width} w-full bg-ink-900 border border-ink-700 rounded-lg shadow-2xl flex flex-col max-h-[92vh]`}

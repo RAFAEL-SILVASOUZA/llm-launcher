@@ -170,6 +170,11 @@ export function ConfigEditor({
       open={open}
       onClose={onClose}
       width="max-w-6xl"
+      // Esta modal carrega bastante input — não deve fechar com Esc nem clique
+      // no backdrop pra evitar perder edição por engano. Só fecha via X ou
+      // botão Cancelar.
+      closeOnEsc={false}
+      closeOnBackdrop={false}
       title={initial?.model ? "Editar configuração" : "Nova configuração"}
       footer={
         <>

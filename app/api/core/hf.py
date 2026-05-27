@@ -179,10 +179,17 @@ def plan_download(
     branch: str,
     rel_paths: list[str],
     subdir: str | None = None,
+    base_root: Path | None = None,
 ) -> dict:
-    """Devolve o plano: arquivos esperados + caminhos de destino + tamanhos."""
+    """Devolve o plano: arquivos esperados + caminhos de destino + tamanhos.
+
+    base_root é a pasta raiz onde criar o subdir owner/repo. Quando None, cai
+    pro MODELS_DIR — só pra manter compat de chamadas antigas; o caminho novo
+    sempre passa base_root explícito.
+    """
     owner, repo = repo_id.split("/", 1)
-    base_dir = MODELS_DIR / owner / repo
+    root = base_root or MODELS_DIR
+    base_dir = root / owner / repo
     if subdir:
         base_dir = base_dir / subdir
 

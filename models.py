@@ -43,6 +43,85 @@ BACKENDS: dict[str, dict] = {
 }
 LMS          = Path(r"C:\Users\PC\.lmstudio\bin\lms.exe")
 CONFIG_FILE  = Path(r"C:\Projetos\llama-cpp-turboquant\last_config.json")
+# Compartilhado com a app Electron (app/api/core/settings_store.py). Mesmo
+# arquivo, mesmo schema — editar num lado reflete no outro.
+SETTINGS_FILE = CONFIG_FILE.with_name("app_settings.json")
+
+
+def _read_settings_file() -> dict:
+    try:
+        if SETTINGS_FILE.exists():
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def get_configured_model_dirs() -> list[Path]:
+    """Apenas o que está explicitamente no settings (sem fallback).
+
+    Usado para validar destinos de download — precisa estar cadastrado.
+    """
+    raw = _read_settings_file().get("model_paths")
+    if isinstance(raw, list):
+        return [Path(str(p)) for p in raw if str(p).strip()]
+    return []
+
+
+def get_model_dirs() -> list[Path]:
+    """Pastas onde varrer GGUF. Default = MODELS_DIR quando settings vazio."""
+    paths = get_configured_model_dirs()
+    return paths if paths else [MODELS_DIR]
+
+
+def save_model_dirs(paths: list[Path]) -> None:
+    """Sobrescreve `model_paths` no settings, preservando outras chaves."""
+    current = _read_settings_file()
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for p in paths:
+        s = str(p).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        cleaned.append(s)
+    current["model_paths"] = cleaned
+    try:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.write_text(
+            json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"⚠️  Falha ao salvar settings: {e}")
+
+
+def primary_model_dir() -> Path:
+    """Primeiro caminho configurado — destino de downloads."""
+    dirs = get_model_dirs()
+    return dirs[0] if dirs else MODELS_DIR
+
+
+def rel_to_any_root(model_path: Path, roots: list[Path] | None = None) -> str:
+    """Caminho relativo à primeira raiz ancestral; cai pro absoluto se não houver."""
+    for root in (roots if roots is not None else get_model_dirs()):
+        try:
+            return model_path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return str(model_path)
+
+
+def containing_root(model_path: Path, roots: list[Path] | None = None) -> Path | None:
+    """Qual raiz configurada contém este modelo — None se nenhuma."""
+    for root in (roots if roots is not None else get_model_dirs()):
+        try:
+            model_path.relative_to(root)
+            return root
+        except ValueError:
+            continue
+    return None
 
 MMPROJ_ERROR_PATTERNS = (
     "unsupported decoder rope type",
@@ -95,6 +174,7 @@ MODE_CHOICES = [
     questionary.Choice("llama-cli     — Chat interativo no terminal",                      value="cli"),
     questionary.Choice("download      — Baixar modelo do HuggingFace para a pasta do LM Studio", value="download"),
     questionary.Choice("delete        — Apagar um modelo (.gguf) e o mmproj associado do disco", value="delete"),
+    questionary.Choice("settings      — Configurar pastas onde procurar modelos (.gguf)",  value="settings"),
     questionary.Choice("nvidia-status — Status completo da GPU NVIDIA (memória, temperatura, uso, clocks, power…)", value="nvidia-status"),
 ]
 
@@ -453,8 +533,13 @@ def make_alias(model_path: Path) -> str:
 
 
 def collect_models() -> list[Path]:
-    if not MODELS_DIR.exists():
-        print(f"Pasta não encontrada: {MODELS_DIR}")
+    roots = get_model_dirs()
+    missing = [r for r in roots if not r.exists()]
+    for r in missing:
+        print(f"⚠️  Pasta configurada não existe: {r}")
+    existing = [r for r in roots if r.exists()]
+    if not existing:
+        print("Nenhuma pasta de modelos válida. Configure via menu 'settings'.")
         sys.exit(1)
 
     def _is_primary(f: Path) -> bool:
@@ -463,7 +548,17 @@ def collect_models() -> list[Path]:
         m = _SPLIT_RE.match(f.name)
         return not m or m.group("part") == "00001"
 
-    models = sorted([f for f in MODELS_DIR.rglob("*.gguf") if _is_primary(f)])
+    found: dict[Path, Path] = {}
+    for root in existing:
+        for f in root.rglob("*.gguf"):
+            if not _is_primary(f):
+                continue
+            try:
+                key = f.resolve()
+            except OSError:
+                key = f
+            found.setdefault(key, f)
+    models = sorted(found.values())
 
     if not models:
         print("Nenhum modelo .gguf encontrado.")
@@ -1108,9 +1203,40 @@ def download_file(url: str, dest: Path) -> None:
     tmp.replace(dest)
 
 
-def _download_many(repo_id: str, branch: str, rel_paths: list[str], subdir: str | None = None) -> None:
+def pick_download_dir() -> Path | None:
+    """Escolhe uma das pastas cadastradas para receber o download.
+
+    Retorna None se o usuário cancelar ou não houver pasta cadastrada (com
+    aviso pra ele ir configurar primeiro). Pula a pergunta quando só tem uma.
+    """
+    dirs = get_configured_model_dirs()
+    if not dirs:
+        print("❌ Nenhuma pasta de modelos cadastrada.")
+        print("   Cadastre pelo menos um caminho no menu 'settings' antes de baixar.")
+        return None
+    if len(dirs) == 1:
+        return dirs[0]
+    choices = [questionary.Choice(str(p), value=p) for p in dirs]
+    picked = questionary.select(
+        "📁 Em qual pasta salvar?",
+        choices=choices,
+    ).ask()
+    return picked
+
+
+def _download_many(
+    repo_id: str,
+    branch: str,
+    rel_paths: list[str],
+    subdir: str | None = None,
+    base_root: Path | None = None,
+) -> None:
+    if base_root is None:
+        base_root = pick_download_dir()
+        if base_root is None:
+            return
     owner, repo = repo_id.split("/", 1)
-    base_dir = MODELS_DIR / owner / repo
+    base_dir = base_root / owner / repo
     if subdir:
         base_dir = base_dir / subdir
 
@@ -1314,15 +1440,17 @@ def _rmdir_if_empty(path: Path, stop_at: Path) -> None:
 
 def delete_flow() -> None:
     models = collect_models()
+    roots = get_model_dirs()
 
     labels = []
     for m in models:
         mmproj = find_mmproj(m.parent)
         tag    = " | 🖼️ mmproj" if mmproj else ""
-        rel    = m.relative_to(MODELS_DIR).as_posix()
+        rel    = rel_to_any_root(m, roots)
         labels.append(f"{make_alias(m)}{tag}  ({rel})")
 
-    print(f"\n📋 {len(models)} modelo(s) em {MODELS_DIR}\n")
+    roots_str = ", ".join(str(r) for r in roots)
+    print(f"\n📋 {len(models)} modelo(s) em {roots_str}\n")
 
     sel = questionary.select(
         "🗑️  Selecione o modelo para DELETAR:",
@@ -1392,13 +1520,92 @@ def delete_flow() -> None:
             print(f"   ❌ {f}: {e}")
 
     delete_config(model_path)
-    _rmdir_if_empty(folder, MODELS_DIR)
+    _rmdir_if_empty(folder, containing_root(model_path) or MODELS_DIR)
 
     if errors:
         print(f"\n⚠️  Concluído com {errors} erro(s).")
     else:
         print("\n✅ Modelo removido.")
         print("   (se o LM Studio estiver aberto, ele atualiza a lista sozinho)")
+
+
+# ─── settings ─────────────────────────────────────────────────────────────────
+
+def settings_flow() -> None:
+    """Edita a lista de pastas onde varremos GGUF. Compartilhado com a app."""
+    while True:
+        paths = get_model_dirs()
+        print(f"\n📁 Pastas configuradas ({SETTINGS_FILE}):")
+        if not paths:
+            print("   (nenhuma — usando default)")
+        else:
+            for i, p in enumerate(paths, 1):
+                marker = "" if p.exists() else "  ⚠️ não existe"
+                print(f"   {i}. {p}{marker}")
+        print()
+
+        action = questionary.select(
+            "O que você quer fazer?",
+            choices=[
+                questionary.Choice("➕ Adicionar caminho",                value="add"),
+                questionary.Choice("✏️  Editar caminho",                  value="edit"),
+                questionary.Choice("🗑️  Remover caminho",                value="remove"),
+                questionary.Choice("↩️  Resetar para o default do LM Studio", value="reset"),
+                questionary.Choice("✅ Sair",                              value="quit"),
+            ],
+        ).ask()
+
+        if not action or action == "quit":
+            return
+
+        if action == "add":
+            new = questionary.text("Caminho da pasta de modelos:").ask()
+            if not new:
+                continue
+            new_path = Path(new.strip().strip('"'))
+            if not new_path.exists():
+                if not questionary.confirm(
+                    f"⚠️  {new_path} não existe. Salvar mesmo assim?", default=False,
+                ).ask():
+                    continue
+            save_model_dirs(paths + [new_path])
+            print("✅ Adicionado e salvo.")
+
+        elif action == "edit":
+            if not paths:
+                print("Nada para editar.")
+                continue
+            choices = [questionary.Choice(str(p), value=i) for i, p in enumerate(paths)]
+            idx = questionary.select("Qual caminho editar?", choices=choices).ask()
+            if idx is None:
+                continue
+            new = questionary.text("Novo valor:", default=str(paths[idx])).ask()
+            if new is None:
+                continue
+            new_path = Path(new.strip().strip('"'))
+            updated = list(paths)
+            updated[idx] = new_path
+            save_model_dirs(updated)
+            print("✅ Atualizado e salvo.")
+
+        elif action == "remove":
+            if not paths:
+                print("Nada para remover.")
+                continue
+            choices = [questionary.Choice(str(p), value=i) for i, p in enumerate(paths)]
+            idx = questionary.select("Qual caminho remover?", choices=choices).ask()
+            if idx is None:
+                continue
+            updated = [p for i, p in enumerate(paths) if i != idx]
+            save_model_dirs(updated)
+            print("✅ Removido e salvo.")
+
+        elif action == "reset":
+            if questionary.confirm(
+                f"Resetar para apenas {MODELS_DIR}?", default=False,
+            ).ask():
+                save_model_dirs([MODELS_DIR])
+                print("✅ Resetado.")
 
 
 # ─── nvidia-status ────────────────────────────────────────────────────────────
@@ -2653,6 +2860,10 @@ def main():
         delete_flow()
         return
 
+    if mode == "settings":
+        settings_flow()
+        return
+
     if mode == "nvidia-status":
         nvidia_status_flow()
         return
@@ -2674,16 +2885,18 @@ def main():
         return
 
     models = collect_models()
+    roots = get_model_dirs()
 
     labels = []
     for m in models:
         alias  = make_alias(m)
         mmproj = find_mmproj(m.parent)
         tag    = " | 🖼️ Image" if mmproj else ""
-        rel    = m.relative_to(MODELS_DIR).as_posix()
+        rel    = rel_to_any_root(m, roots)
         labels.append(f"{alias}{tag}  ({rel})")
 
-    print(f"\n📋 {len(models)} modelo(s) encontrado(s) em {MODELS_DIR}\n")
+    roots_str = ", ".join(str(r) for r in roots)
+    print(f"\n📋 {len(models)} modelo(s) encontrado(s) em {roots_str}\n")
 
     selected_label = questionary.select(
         "➡️  Selecione um modelo:",

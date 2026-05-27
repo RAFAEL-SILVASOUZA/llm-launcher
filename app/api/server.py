@@ -63,6 +63,7 @@ from api.core import (  # noqa: E402
     nvidia,
     runner,
     running,
+    settings_store,
 )
 
 @asynccontextmanager
@@ -183,7 +184,24 @@ def get_nvidia():
 
 @app.get("/api/models")
 def list_models():
-    return [models_repo.describe_model(m) for m in models_repo.collect_models()]
+    roots = settings_store.get_scan_paths()
+    return [models_repo.describe_model(m, roots) for m in models_repo.collect_models(roots)]
+
+
+# ─── routes: app settings (paths das pastas de modelos, etc.) ─────────────────
+
+class SettingsPayload(BaseModel):
+    model_paths: list[str] = Field(default_factory=list)
+
+
+@app.get("/api/settings")
+def get_settings():
+    return settings_store.read_settings()
+
+
+@app.post("/api/settings")
+def update_settings(payload: SettingsPayload):
+    return settings_store.save_settings(payload.model_dump())
 
 
 class MetaRequest(BaseModel):
@@ -476,6 +494,7 @@ class HfDownloadRequest(BaseModel):
     branch: str = "main"
     rel_paths: list[str]
     subdir: str | None = None
+    base_dir: str
 
 
 class DownloadSession:
@@ -509,7 +528,30 @@ _DOWNLOADS_LOCK = threading.Lock()
 
 @app.post("/api/hf/download")
 def hf_download(req: HfDownloadRequest):
-    plan = hf.plan_download(req.repo_id, req.branch, req.rel_paths, req.subdir)
+    configured = settings_store.get_configured_paths()
+    if not configured:
+        raise HTTPException(
+            400,
+            "Nenhuma pasta de modelos cadastrada. Vá em Settings e adicione "
+            "pelo menos um caminho antes de baixar.",
+        )
+    chosen = Path(req.base_dir)
+    # Compara strings normalizadas — Path.__eq__ no Windows é case-sensitive,
+    # mas o filesystem não. Resolve nas duas pontas pra evitar mismatch por
+    # trailing slash / case.
+    def _norm(p: Path) -> str:
+        try:
+            return str(p.resolve()).lower()
+        except Exception:
+            return str(p).lower()
+    allowed = {_norm(p) for p in configured}
+    if _norm(chosen) not in allowed:
+        raise HTTPException(
+            400,
+            f"Caminho '{req.base_dir}' não está cadastrado. Caminhos válidos: "
+            + ", ".join(str(p) for p in configured),
+        )
+    plan = hf.plan_download(req.repo_id, req.branch, req.rel_paths, req.subdir, chosen)
     session = DownloadSession(plan)
     with _DOWNLOADS_LOCK:
         _DOWNLOADS[session.id] = session

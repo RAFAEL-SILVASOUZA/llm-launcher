@@ -38,7 +38,14 @@ export function LaunchModal({ open, launchId, config, onClose }: Props) {
     let es: EventSource | null = null;
     let cancelled = false;
     (async () => {
-      es = await eventsStream(launchId);
+      const stream = await eventsStream(launchId);
+      if (cancelled) {
+        // Cleanup já rodou antes do await resolver — fecha pra não vazar
+        // o SSE no servidor (o request fica drenando a queue à toa).
+        stream.close();
+        return;
+      }
+      es = stream;
       es.onmessage = (e) => {
         if (cancelled) return;
         try {
@@ -57,7 +64,7 @@ export function LaunchModal({ open, launchId, config, onClose }: Props) {
       cancelled = true;
       es?.close();
     };
-  }, [launchId]);
+  }, [launchId, open]);
 
   function handleEvent(ev: LaunchEvent) {
     setLines((prev) => {

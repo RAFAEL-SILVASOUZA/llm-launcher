@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Settings, HardDrive, Download, Cpu, Loader2 } from "lucide-react";
+import { Settings, HardDrive, Download, Cpu, Loader2, SlidersHorizontal } from "lucide-react";
 import { api, downloadEventsStream } from "./api/client";
 import type {
   BackendStatus, Estimate, HfDownloadEvent, HfDownloadPlan, LaunchConfig,
@@ -14,9 +14,10 @@ import { Header } from "./components/Header";
 import { LaunchModal } from "./components/LaunchModal";
 import { ModelsPage } from "./components/ModelsPage";
 import { NvidiaPage } from "./components/NvidiaPage";
+import { SettingsPage } from "./components/SettingsPage";
 import { Tabs } from "./components/Tabs";
 
-type TabId = "configs" | "models" | "download" | "nvidia";
+type TabId = "configs" | "models" | "download" | "nvidia" | "settings";
 
 export default function App() {
   const [system, setSystem]       = useState<SystemInfo | null>(null);
@@ -252,7 +253,7 @@ export default function App() {
   };
 
   const handleStartDownload = async (req: {
-    repo_id: string; rel_paths: string[]; subdir?: string | null;
+    repo_id: string; rel_paths: string[]; subdir?: string | null; base_dir: string;
   }) => {
     setDownloadEvents([]);
     setDownloadProgress({});
@@ -298,6 +299,7 @@ export default function App() {
         : <Download className="w-4 h-4" />,
     },
     { id: "nvidia"  as TabId,  label: "NVIDIA",   icon: <Cpu className="w-4 h-4" /> },
+    { id: "settings" as TabId, label: "Settings", icon: <SlidersHorizontal className="w-4 h-4" /> },
   ];
 
   return (
@@ -349,12 +351,14 @@ export default function App() {
                 progress={downloadProgress}
                 done={downloadDone}
                 error={downloadError}
+                models={models}
                 onStart={handleStartDownload}
                 onCancel={handleCancelDownload}
                 onReset={handleResetDownload}
               />
             )}
             {tab === "nvidia"  && <NvidiaPage />}
+            {tab === "settings" && <SettingsPage onSaved={refresh} />}
           </>
         )}
       </main>

@@ -7,6 +7,7 @@
 
 import type {
   ActiveLaunch,
+  AppSettings,
   BackendStatus,
   DeletePlan,
   DeleteResult,
@@ -192,6 +193,7 @@ export const api = {
     branch?: string;
     rel_paths: string[];
     subdir?: string | null;
+    base_dir: string;
   }) =>
     jsonFetch<{ download_id: string; plan: HfDownloadPlan }>("/api/hf/download", {
       method: "POST",
@@ -222,6 +224,14 @@ export const api = {
 
   // ─── nvidia ──────────────────────────────────────────────────────────
   nvidia: () => jsonFetch<NvidiaStatus>("/api/nvidia"),
+
+  // ─── app settings ────────────────────────────────────────────────────
+  getSettings: () => jsonFetch<AppSettings>("/api/settings"),
+  saveSettings: (settings: AppSettings) =>
+    jsonFetch<AppSettings>("/api/settings", {
+      method: "POST",
+      body: JSON.stringify(settings),
+    }),
 };
 
 export async function eventsStream(launchId: string): Promise<EventSource> {

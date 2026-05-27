@@ -96,11 +96,26 @@ def model_disk_size_mib(model_path: Path) -> int:
     return total // (1024 * 1024)
 
 
-def collect_models(models_dir: Path = MODELS_DIR) -> list[Path]:
-    """Lista todos os .gguf primários (sem mmproj, sem partes 00002+)."""
-    if not models_dir.exists():
-        return []
-    return sorted(f for f in models_dir.rglob("*.gguf") if is_primary_part(f))
+def collect_models(models_dir: Path | list[Path] = MODELS_DIR) -> list[Path]:
+    """Lista todos os .gguf primários (sem mmproj, sem partes 00002+).
+
+    Aceita um único Path (compat) ou uma lista — varre todas as pastas, dedup
+    por caminho resolvido e devolve em ordem alfabética estável.
+    """
+    roots = [models_dir] if isinstance(models_dir, Path) else list(models_dir)
+    found: dict[Path, Path] = {}
+    for root in roots:
+        if not root.exists():
+            continue
+        for f in root.rglob("*.gguf"):
+            if not is_primary_part(f):
+                continue
+            try:
+                key = f.resolve()
+            except OSError:
+                key = f
+            found.setdefault(key, f)
+    return sorted(found.values())
 
 
 def plan_delete_model(model_path: Path) -> list[Path]:
@@ -166,13 +181,22 @@ def delete_model(model_path: Path, models_dir: Path = MODELS_DIR) -> dict:
     return {"removed": removed, "errors": errors, "total_bytes": total}
 
 
-def describe_model(model_path: Path, models_dir: Path = MODELS_DIR) -> dict:
-    """Dict serializável com infos básicas — alimenta a lista no frontend."""
+def describe_model(model_path: Path, models_dir: Path | list[Path] = MODELS_DIR) -> dict:
+    """Dict serializável com infos básicas — alimenta a lista no frontend.
+
+    `models_dir` pode ser uma raiz só ou várias — usamos a primeira que contém
+    o arquivo pra montar o caminho relativo. Cai pro path absoluto se nenhuma
+    raiz for ancestral.
+    """
     mmproj = find_mmproj(model_path.parent)
-    try:
-        rel = model_path.relative_to(models_dir).as_posix()
-    except ValueError:
-        rel = str(model_path)
+    roots = [models_dir] if isinstance(models_dir, Path) else list(models_dir)
+    rel = str(model_path)
+    for root in roots:
+        try:
+            rel = model_path.relative_to(root).as_posix()
+            break
+        except ValueError:
+            continue
     return {
         "path":           str(model_path),
         "alias":          make_alias(model_path),
