@@ -94,6 +94,9 @@ export function LaunchModal({ open, launchId, config, onClose }: Props) {
         case "restart":
           next.push({ kind: "info", text: `reiniciando (#${ev.attempt}) em ${ev.backoff}s…`, icon: <RotateCw className="w-3 h-3" /> });
           break;
+        case "manual_restart":
+          next.push({ kind: "degrade", text: `restart manual — subindo de novo (#${ev.attempt}), mesma config`, icon: <RotateCw className="w-3 h-3" /> });
+          break;
         case "giveup":
           next.push({ kind: "fail", text: `desistiu: ${ev.reason}${ev.failure ? ` (${ev.failure})` : ""}`, icon: <Square className="w-3 h-3" /> });
           setDone(true);
@@ -118,6 +121,16 @@ export function LaunchModal({ open, launchId, config, onClose }: Props) {
     setLines((prev) => [...prev, { kind: "fail", text: "cancelado pelo usuário", icon: <Square className="w-3 h-3" /> }]);
     await api.cancelLaunch(launchId);
     onClose();
+  };
+
+  const handleRestart = async () => {
+    if (!launchId) return;
+    setLines((prev) => [...prev, { kind: "info", text: "restart manual solicitado…", icon: <RotateCw className="w-3 h-3" /> }]);
+    try {
+      await api.restartLaunch(launchId);
+    } catch (e) {
+      setLines((prev) => [...prev, { kind: "fail", text: `falha ao reiniciar: ${(e as Error).message}`, icon: <XCircle className="w-3 h-3" /> }]);
+    }
   };
 
   const handleLmsFallback = async () => {
@@ -164,12 +177,21 @@ export function LaunchModal({ open, launchId, config, onClose }: Props) {
       footer={
         <>
           {!done && (
-            <button
-              onClick={handleCancel}
-              className="px-3 py-1.5 text-sm rounded bg-red-900/60 hover:bg-red-800 text-red-100 flex items-center gap-1"
-            >
-              <XCircle className="w-3.5 h-3.5" />Cancelar
-            </button>
+            <>
+              <button
+                onClick={handleRestart}
+                className="px-3 py-1.5 text-sm rounded bg-amber-900/60 hover:bg-amber-800 text-amber-100 flex items-center gap-1"
+                title="Mata e sobe o llama-server de novo com a mesma config (mesma porta). O cliente reconecta."
+              >
+                <RotateCw className="w-3.5 h-3.5" />Reiniciar
+              </button>
+              <button
+                onClick={handleCancel}
+                className="px-3 py-1.5 text-sm rounded bg-red-900/60 hover:bg-red-800 text-red-100 flex items-center gap-1"
+              >
+                <XCircle className="w-3.5 h-3.5" />Cancelar
+              </button>
+            </>
           )}
           {lmsHint && !lmsResult && (
             <button

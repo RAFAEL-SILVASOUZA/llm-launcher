@@ -124,6 +124,85 @@ def ram_avail_mib() -> int | None:
     return _ram_mib_pair()[1]
 
 
+# Lock de clock da VRAM (3090 Ti rebaixa P2->P3 na inferência, -35% t/s).
+# O lock/reset exige admin; o backend roda sem elevação, então o toggle
+# dispara tarefas agendadas SYSTEM pré-registradas com SDDL que permite
+# Authenticated Users iniciá-las. Setup: scripts/setup_vram_lock_tasks.ps1.
+VRAM_LOCK_MHZ = 10251
+_VRAM_LOCK_TASK = {True: "VRAMLockOn", False: "VRAMLockOff"}
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+def _vram_lock_tasks_available() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Query", "/TN", _VRAM_LOCK_TASK[True]],
+            capture_output=True, timeout=10, creationflags=_NO_WINDOW,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def vram_lock_status() -> dict:
+    """Estado do lock de VRAM. `locked` é heurístico: clocks.mem >= 10251.
+
+    Sob carga pesada a GPU pode boostar a 10251 mesmo sem lock, mas em idle
+    (caso típico ao olhar a página) sem lock o clock fica em 405/5001.
+    """
+    smi = nvidia_smi_path()
+    mem_mhz: int | None = None
+    pstate: str | None = None
+    try:
+        r = subprocess.run(
+            [smi, "--query-gpu=clocks.mem,pstate", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+            creationflags=_NO_WINDOW,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            mem_s, pstate = (x.strip() for x in r.stdout.strip().splitlines()[0].split(","))
+            mem_mhz = int(mem_s)
+    except Exception:
+        pass
+    return {
+        "supported": _vram_lock_tasks_available(),
+        "locked": (mem_mhz >= VRAM_LOCK_MHZ) if mem_mhz is not None else None,
+        "mem_clock_mhz": mem_mhz,
+        "pstate": pstate,
+        "lock_mhz": VRAM_LOCK_MHZ,
+    }
+
+
+def set_vram_lock(enabled: bool) -> dict:
+    """Liga/desliga o lock disparando a tarefa agendada correspondente."""
+    task = _VRAM_LOCK_TASK[enabled]
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Run", "/TN", task],
+            capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW,
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        return {
+            "ok": False,
+            "error": f"schtasks /Run {task} falhou: {err}. "
+                     "Rode scripts/setup_vram_lock_tasks.ps1 como admin.",
+        }
+    # schtasks /Run é assíncrono e o P-state demora a transicionar (unlock
+    # leva ~5 s pra cair de 10251 → 405). Polla até o estado refletir o
+    # pedido; se não refletir em 10 s devolve o que tiver (a tarefa rodou).
+    status = vram_lock_status()
+    deadline = time.time() + 10.0
+    while status.get("locked") is not enabled and time.time() < deadline:
+        time.sleep(1.0)
+        status = vram_lock_status()
+    return {"ok": True, **status}
+
+
 def nvidia_status() -> dict:
     """Status detalhado da GPU (todos os sensores em NVIDIA_QUERY_FIELDS)."""
     smi = nvidia_smi_path()

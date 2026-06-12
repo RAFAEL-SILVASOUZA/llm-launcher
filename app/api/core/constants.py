@@ -21,8 +21,9 @@ LLAMA_SERVER_TURBO   = Path(r"C:\Projetos\llama-cpp-turboquant\build\bin\Release
 LLAMA_CLI_TURBO      = Path(r"C:\Projetos\llama-cpp-turboquant\build\bin\Release\llama-cli.exe")
 LLAMA_SERVER_VANILLA = Path(r"C:\Projetos\llama-cpp\build\bin\Release\llama-server.exe")
 LLAMA_CLI_VANILLA    = Path(r"C:\Projetos\llama-cpp\build\bin\Release\llama-cli.exe")
-LLAMA_SERVER_MTP     = Path(r"C:\Projetos\llama-cpp-mtp\build\bin\Release\llama-server.exe")
-LLAMA_CLI_MTP        = Path(r"C:\Projetos\llama-cpp-mtp\build\bin\Release\llama-cli.exe")
+# MTP nativo no upstream (PR #22673) — fork am17an obsoleto, reusa o build vanilla.
+LLAMA_SERVER_MTP     = LLAMA_SERVER_VANILLA
+LLAMA_CLI_MTP        = LLAMA_CLI_VANILLA
 
 BACKENDS: dict[str, dict] = {
     "turbo": {
@@ -41,14 +42,20 @@ BACKENDS: dict[str, dict] = {
     },
     "mtp": {
         "label":             "mtp",
-        "description":       "fork am17an com speculative decoding via head MTP",
+        "description":       "vanilla upstream + speculative MTP nativo (--spec-type draft-mtp)",
         "server":            LLAMA_SERVER_MTP,
         "cli":               LLAMA_CLI_MTP,
         "supports_spec_mtp": True,
     },
 }
 
-THINKING_KEYWORDS = {"qwen3", "qwq", "deepseek-r1", "thinking", "reasoning"}
+# Backends que NÃO têm build próprio — reusam o binário de outro, mudando só o
+# perfil de launch. mtp = vanilla upstream com --spec-type draft-mtp (MTP virou
+# nativo no PR #22673). Esses não aparecem como diretório configurável no
+# Settings e seguem o path (default ou override) do backend-alvo.
+BACKEND_BINARY_ALIAS = {"mtp": "vanilla"}
+
+THINKING_KEYWORDS = {"qwen3", "qwq", "deepseek-r1", "thinking", "reasoning", "gemma-4", "gemma4"}
 
 MMPROJ_ERROR_PATTERNS = (
     "unsupported decoder rope type",
@@ -131,11 +138,11 @@ PARALLEL_OPTIONS = [
 ]
 
 MAX_TOKENS_OPTIONS = [
-    {"value": -1,     "label": "-1 — Ilimitado [default]"},
-    {"value": 2_048,  "label": "2 048"},
-    {"value": 4_096,  "label": "4 096"},
-    {"value": 8_192,  "label": "8 192"},
+    {"value": 8_192,  "label": "8 192 [recomendado — limita runaway/loop]"},
     {"value": 16_384, "label": "16 384"},
+    {"value": 4_096,  "label": "4 096"},
+    {"value": 2_048,  "label": "2 048"},
+    {"value": -1,     "label": "-1 — Ilimitado (sem proteção)"},
 ]
 
 BATCH_OPTIONS = [
@@ -169,7 +176,7 @@ CTX_CHECKPOINTS_OPTIONS = [
 
 SPEC_DRAFT_N_MAX_OPTIONS = [
     {"value": 1, "label": "1 — rascunho mínimo"},
-    {"value": 2, "label": "2 — default do fork am17an [recomendado]"},
+    {"value": 2, "label": "2 — recomendado p/ MTP (Unsloth) [recomendado]"},
     {"value": 3, "label": "3 — rascunho maior"},
     {"value": 4, "label": "4 — rascunho agressivo (mais rejeição)"},
 ]

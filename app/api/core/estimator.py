@@ -292,7 +292,9 @@ def suggest_n_cpu_moe(
     moe_layers = meta.get("moe_layers_count", 0)
     if moe_layers <= 0:
         return 0
-    vram_avail = gpu_free_mib()
+    # VRAM total × reserva, não a livre (vide suggest_n_gpu_layers): evita
+    # mandar peso MoE pra CPU por causa de VRAM presa transitoriamente.
+    vram_avail = gpu_total_mib()
     if not vram_avail:
         return 0
     budget = int(vram_avail * target_vram_pct)
@@ -322,7 +324,11 @@ def suggest_n_gpu_layers(
     if not meta:
         return 99
     n_layer = meta["n_layer"]
-    vram_avail = gpu_free_mib()
+    # Orça contra a VRAM TOTAL (× reserva), não a livre: o modelo vai ocupar a
+    # GPU só depois do server subir, e a app descarrega o anterior antes. Usar a
+    # livre no instante (desktop/browser/outro server) encolhe o budget e empurra
+    # camadas pra CPU silenciosamente — lentidão sem aviso. OOM real → auto-degrade.
+    vram_avail = gpu_total_mib()
     if not vram_avail:
         return 99
     budget = int(vram_avail * target_vram_pct)

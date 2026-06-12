@@ -17,9 +17,16 @@ LLAMA_SERVER_TURBO   = Path(r"C:\Projetos\llama-cpp-turboquant\build\bin\Release
 LLAMA_CLI_TURBO      = Path(r"C:\Projetos\llama-cpp-turboquant\build\bin\Release\llama-cli.exe")
 LLAMA_SERVER_VANILLA = Path(r"C:\Projetos\llama-cpp\build\bin\Release\llama-server.exe")
 LLAMA_CLI_VANILLA    = Path(r"C:\Projetos\llama-cpp\build\bin\Release\llama-cli.exe")
-# Fork am17an/llama.cpp:mtp-clean — suporte real a MTP (speculative decoding).
-LLAMA_SERVER_MTP     = Path(r"C:\Projetos\llama-cpp-mtp\build\bin\Release\llama-server.exe")
-LLAMA_CLI_MTP        = Path(r"C:\Projetos\llama-cpp-mtp\build\bin\Release\llama-cli.exe")
+# MTP agora é nativo no upstream (PR #22673, via --spec-type draft-mtp), inclusive
+# o fix qwen35 post-norm hidden state (#24025). O fork am17an/llama.cpp:mtp-clean
+# ficou obsoleto — apontamos pro mesmo build vanilla, que já carrega a head MTP.
+LLAMA_SERVER_MTP     = LLAMA_SERVER_VANILLA
+LLAMA_CLI_MTP        = LLAMA_CLI_VANILLA
+# Fork spiritbuun/buun-llama-cpp (a.k.a. Anbeeld/beellama.cpp) — DFlash: drafter
+# GGUF SEPARADO que cross-attende aos hidden states do alvo (--spec-type dflash).
+# Caminho na convenção dos demais; ajustar quando o build existir.
+LLAMA_SERVER_DFLASH  = Path(r"C:\Projetos\llama-cpp-dflash\build\bin\Release\llama-server.exe")
+LLAMA_CLI_DFLASH     = Path(r"C:\Projetos\llama-cpp-dflash\build\bin\Release\llama-cli.exe")
 
 BACKENDS: dict[str, dict] = {
     "turbo": {
@@ -27,18 +34,28 @@ BACKENDS: dict[str, dict] = {
         "server":           LLAMA_SERVER_TURBO,
         "cli":              LLAMA_CLI_TURBO,
         "supports_spec_mtp": False,
+        "supports_spec_dflash": False,
     },
     "vanilla": {
         "label":            "vanilla     — upstream llama.cpp (parsers de chat/tool mais novos)",
         "server":           LLAMA_SERVER_VANILLA,
         "cli":              LLAMA_CLI_VANILLA,
         "supports_spec_mtp": False,
+        "supports_spec_dflash": False,
     },
     "mtp": {
-        "label":            "mtp         — fork am17an com speculative decoding via head MTP",
+        "label":            "mtp         — vanilla upstream + speculative MTP nativo (--spec-type draft-mtp)",
         "server":           LLAMA_SERVER_MTP,
         "cli":              LLAMA_CLI_MTP,
         "supports_spec_mtp": True,
+        "supports_spec_dflash": False,
+    },
+    "dflash": {
+        "label":            "dflash      — fork buun/beellama, spec decoding via drafter GGUF separado",
+        "server":           LLAMA_SERVER_DFLASH,
+        "cli":              LLAMA_CLI_DFLASH,
+        "supports_spec_mtp": False,
+        "supports_spec_dflash": True,
     },
 }
 LMS          = Path(r"C:\Users\PC\.lmstudio\bin\lms.exe")
@@ -165,7 +182,7 @@ STABILIZE_SECONDS = 30  # tempo sem crash pós-load pra promover a config a "boa
 CPU_THREADS_GEN   = 14
 CPU_THREADS_BATCH = 20
 
-THINKING_KEYWORDS = {"qwen3", "qwq", "deepseek-r1", "thinking", "reasoning"}
+THINKING_KEYWORDS = {"qwen3", "qwq", "deepseek-r1", "thinking", "reasoning", "gemma-4", "gemma4"}
 
 # ─── choices ──────────────────────────────────────────────────────────────────
 
@@ -221,11 +238,11 @@ PARALLEL_CHOICES = [
 ]
 
 MAX_TOKENS_CHOICES = [
-    questionary.Choice("   -1  — Ilimitado  [default]", value=-1),
-    questionary.Choice(" 2048",                          value=2_048),
-    questionary.Choice(" 4096",                          value=4_096),
-    questionary.Choice(" 8192",                          value=8_192),
-    questionary.Choice("16384",                          value=16_384),
+    questionary.Choice(" 8192  [default — limita runaway/loop]", value=8_192),
+    questionary.Choice("16384",                                  value=16_384),
+    questionary.Choice(" 4096",                                  value=4_096),
+    questionary.Choice(" 2048",                                  value=2_048),
+    questionary.Choice("   -1  — Ilimitado (sem proteção)",      value=-1),
 ]
 
 BATCH_CHOICES = [
@@ -269,15 +286,20 @@ CTX_CHECKPOINTS_CHOICES = [
 
 # --spec-draft-n-max: teto de tokens que a head MTP rascunha por passo de
 # decode antes da verificação pelo modelo base. Só tem efeito no backend
-# 'mtp' (fork am17an) com um modelo que carrega head MTP. 2 é o default do
-# fork; valores altos rascunham mais tokens de uma vez, mas sobem a taxa de
+# 'mtp' (vanilla upstream, --spec-type draft-mtp) com um modelo que carrega head
+# MTP. 2 é o recomendado pela model card da Unsloth; valores altos rascunham mais
+# tokens de uma vez, mas sobem a taxa de
 # rejeição — o ganho cai quando o rascunho erra e é descartado.
 SPEC_DRAFT_N_MAX_CHOICES = [
     questionary.Choice("1  — rascunho mínimo (1 token especulado)",     value=1),
-    questionary.Choice("2  — default do fork am17an  [recomendado]",    value=2),
+    questionary.Choice("2  — recomendado p/ MTP (Unsloth)  [recomendado]", value=2),
     questionary.Choice("3  — rascunho maior",                            value=3),
     questionary.Choice("4  — rascunho agressivo (mais rejeição)",        value=4),
 ]
+
+# DFlash (fork buun) não expõe knob de cross-ctx por CLI: o preset
+# --spec-dflash-default já liga spec-type dflash + tuning (n_max=7, p_min=0) e o
+# binário auto-seta -cd 256. O único parâmetro que escolhemos é o drafter (-md).
 
 # ─── helpers de backend ───────────────────────────────────────────────────────
 
@@ -350,6 +372,7 @@ _KV_TYPES_FALLBACK: dict[str, set[str]] = {
     "turbo":   {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1","turbo2","turbo3","turbo4"},
     "vanilla": {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
     "mtp":     {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
+    "dflash":  {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
 }
 
 # Ordem de preferência pro remap quando o tipo escolhido não é suportado pelo
@@ -543,7 +566,11 @@ def collect_models() -> list[Path]:
         sys.exit(1)
 
     def _is_primary(f: Path) -> bool:
-        if 'mmproj' in f.name.lower():
+        low = f.name.lower()
+        if 'mmproj' in low:
+            return False
+        # Drafter do DFlash (-md) é arquivo auxiliar, não um alvo selecionável.
+        if _DFLASH_DRAFTER_RE.search(low):
             return False
         m = _SPLIT_RE.match(f.name)
         return not m or m.group("part") == "00001"
@@ -583,6 +610,80 @@ def is_mtp_model(model_path: Path) -> bool:
     pattern = re.compile(r"(?:^|[-_.])mtp(?:[-_.]|$)", re.IGNORECASE)
     parts = [model_path.name, *(p.name for p in model_path.parents)]
     return any(pattern.search(part) for part in parts)
+
+
+# Drafter do DFlash: GGUF separado, nomeado tipo 'dflash-draft-3.6-q8_0.gguf'.
+_DFLASH_DRAFTER_RE = re.compile(r"dflash.*draft", re.IGNORECASE)
+_DFLASH_DRAFTERS_CACHE: dict[str, list[Path]] = {}
+
+
+def find_dflash_drafters(model_path: Path) -> list[Path]:
+    """Lista os GGUFs drafter do DFlash candidatos a serem o -md do alvo.
+
+    DFlash precisa de um GGUF de rascunho SEPARADO (o drafter cross-attende aos
+    hidden states do alvo). Procura primeiro na pasta do modelo e ancestrais
+    próximos (o drafter costuma vir no mesmo repo HF do alvo), depois varre todas
+    as pastas de modelos. Dedup por caminho resolvido, ordenado do MAIOR pro
+    menor — o estimador usa o primeiro (q8_0 > q4) pra ser conservador na VRAM.
+
+    Cacheado por modelo: o estimador roda em loop e o rglob das pastas é caro.
+    """
+    ck = str(model_path)
+    if ck in _DFLASH_DRAFTERS_CACHE:
+        return _DFLASH_DRAFTERS_CACHE[ck]
+
+    found: dict[str, Path] = {}
+
+    def _scan(d: Path) -> None:
+        try:
+            for f in d.glob("*.gguf"):
+                if _DFLASH_DRAFTER_RE.search(f.name):
+                    try:    key = str(f.resolve()).lower()
+                    except OSError: key = str(f).lower()
+                    found.setdefault(key, f)
+        except Exception:
+            pass
+
+    for d in [model_path.parent, *list(model_path.parents)[:3]]:
+        _scan(d)
+    for root in get_model_dirs():
+        if not root.exists():
+            continue
+        try:
+            for f in root.rglob("*.gguf"):
+                if _DFLASH_DRAFTER_RE.search(f.name):
+                    try:    key = str(f.resolve()).lower()
+                    except OSError: key = str(f).lower()
+                    found.setdefault(key, f)
+        except Exception:
+            pass
+
+    def _size(p: Path) -> int:
+        try:    return p.stat().st_size
+        except Exception: return 0
+
+    result = sorted(found.values(), key=_size, reverse=True)
+    _DFLASH_DRAFTERS_CACHE[ck] = result
+    return result
+
+
+def select_dflash_drafter(model_path: Path) -> Path | None:
+    """Escolhe o drafter (-md) pro DFlash: auto se houver só um, pergunta se
+    houver vários, None (com aviso) se não achar nenhum."""
+    drafters = find_dflash_drafters(model_path)
+    if not drafters:
+        print("⚠️  Nenhum drafter DFlash (dflash-draft-*.gguf) encontrado nas pastas de modelos.")
+        print("   O servidor vai subir SEM speculative decoding — baixe o drafter do alvo p/ ativar.")
+        return None
+    if len(drafters) == 1:
+        print(f"🔮 DFlash drafter detectado: {drafters[0].name}")
+        return drafters[0]
+    choice = questionary.select(
+        "🔮 DFlash — escolha o drafter (-md):",
+        choices=[questionary.Choice(f"{d.name}  ({d.stat().st_size / 1024**3:.2f} GB)", value=str(d))
+                 for d in drafters],
+    ).ask()
+    return Path(choice) if choice else None
 
 
 def ask_int(prompt: str, default: int) -> int:
@@ -830,11 +931,12 @@ def _build_cmd_from_cfg(cfg: dict) -> str:
         threads_batch=cfg.get("threads_batch", CPU_THREADS_BATCH),
         reasoning_budget=cfg.get("reasoning_budget"),
         mlock=cfg.get("mlock", True),
-        max_tokens=cfg.get("max_tokens", -1),
+        max_tokens=cfg.get("max_tokens", 8_192),
         cache_ram=cfg.get("cache_ram", 8_192),
         ctx_checkpoints=cfg.get("ctx_checkpoints", 8),
         n_cpu_moe=cfg.get("n_cpu_moe", 0),
         spec_draft_n_max=cfg.get("spec_draft_n_max", 2),
+        spec_dflash_draft=cfg.get("spec_dflash_draft"),
         preserve_thinking=cfg.get("preserve_thinking", False),
         mmproj=Path(mmproj) if mmproj else None,
         verbose=cfg.get("verbose", False),
@@ -1729,6 +1831,13 @@ _GPU_COMPUTE_SSM_PER_32K   = 240
 # compute medido contra Qwen3.6 27B @ ctx 262k (824 MiB no log de OOM).
 _MTP_DRAFT_COMPUTE_MIB = 800
 
+# DFlash: o drafter é um GGUF SEPARADO carregado junto do alvo (-md), sempre na
+# GPU (-ngld all). O custo dominante são os PESOS do drafter (~1.75 GB no
+# drafter 3.6 q8_0) — somados via tamanho em disco. Além deles há um segundo
+# llama_context pequeno (ctx do rascunho auto-setado pra 256 pelo preset → KV
+# desprezível) e o buffer de cross-attention. Esses dois cabem num compute fixo.
+_DFLASH_DRAFT_COMPUTE_MIB = 450
+
 # mmproj (visão): pesos vão pra VRAM no load; o COMPUTE buffer é alocado em
 # warmup (imagem máxima do modelo). Em Qwen3-VL 27B BF16 @ 1472² o warmup pede
 # 248 MiB e pode ser rejeitado silenciosamente quando a VRAM tá apertada — o
@@ -2345,6 +2454,17 @@ def estimate_memory(
         vram_mtp_kv      = _mtp_draft_kv_mib(meta, context_window, bytes_pe_k, bytes_pe)
         vram_mtp_compute = _MTP_DRAFT_COMPUTE_MIB
 
+    # DFlash: drafter GGUF separado (-md) + segundo contexto pequeno, ambos na
+    # GPU. Pesos dominam; KV do rascunho (256 tokens) e cross-attention cabem no
+    # compute fixo. Auto-detecta o maior drafter (q8_0 > q4) p/ não subestimar.
+    vram_dflash_weights = 0
+    vram_dflash_compute = 0
+    if gpu_active and backend == "dflash":
+        drafters = find_dflash_drafters(model_path)
+        if drafters:
+            vram_dflash_weights = int(_model_disk_size_mib(drafters[0]) * _WEIGHT_OVERHEAD)
+            vram_dflash_compute = _DFLASH_DRAFT_COMPUTE_MIB
+
     ram_kv       = kv_total_mib - vram_kv
     ram_ssm      = ssm_state_mib - vram_ssm
     # --cache-ram é um TETO do prompt cache, não uma alocação: vale 0 no launch
@@ -2379,13 +2499,16 @@ def estimate_memory(
         "vram_mmproj_compute":  vram_mmproj_compute,
         "vram_mtp_kv":      vram_mtp_kv,
         "vram_mtp_compute": vram_mtp_compute,
+        "vram_dflash_weights": vram_dflash_weights,
+        "vram_dflash_compute": vram_dflash_compute,
         "ram_weights":      ram_weights,
         "ram_kv":           ram_kv,
         "ram_ssm":          ram_ssm,
         "cache_ram":        cache_ram_mib,
         "moe_offload_mib":  moe_offload_mib,
         "vram_total":       (vram_weights + vram_kv + vram_compute + vram_ssm
-                             + vram_mmproj + vram_mtp_kv + vram_mtp_compute),
+                             + vram_mmproj + vram_mtp_kv + vram_mtp_compute
+                             + vram_dflash_weights + vram_dflash_compute),
         "ram_total":        ram_weights + ram_kv + ram_ssm,
         "vram_avail":       _gpu_free_mib(),
         "vram_total_phys":  _gpu_total_mib(),
@@ -2475,6 +2598,10 @@ def show_memory_estimate(
             f" + mtp-draft {est['vram_mtp_kv'] + est['vram_mtp_compute']}"
             if est.get("vram_mtp_kv") or est.get("vram_mtp_compute") else ""
         )
+        dflash_note = (
+            f" + dflash-draft {est['vram_dflash_weights'] + est['vram_dflash_compute']}"
+            if est.get("vram_dflash_weights") or est.get("vram_dflash_compute") else ""
+        )
         # mmproj: mostra weights+compute separados pra deixar claro qual parte
         # pode ser rejeitada silenciosamente no warmup (compute) e qual sempre
         # fica em VRAM (weights).
@@ -2485,7 +2612,7 @@ def show_memory_estimate(
             mmproj_note = ""
         print(
             f"   {_C_DIM}vram = pesos {est['vram_weights']} + kv {est['vram_kv']} "
-            f"+ compute {est['vram_compute']}{ssm_note}{mmproj_note}{mtp_note} MiB{moe_note}{_C_RESET}"
+            f"+ compute {est['vram_compute']}{ssm_note}{mmproj_note}{mtp_note}{dflash_note} MiB{moe_note}{_C_RESET}"
         )
         print(
             f"   {_C_DIM}ram  = pesos {est['ram_weights']} + kv {est['ram_kv']} MiB{_C_RESET}"
@@ -2705,6 +2832,7 @@ def build_command(
     ctx_checkpoints:  int,
     n_cpu_moe:        int = 0,
     spec_draft_n_max: int = 2,
+    spec_dflash_draft: str | None = None,
     preserve_thinking: bool = False,
     mmproj:           Path | None = None,
     verbose:          bool = False,
@@ -2742,10 +2870,35 @@ def build_command(
     cmd += f' -np {parallel_slots}'
     cmd += f' -n {max_tokens}'
 
+    # ── Rede de segurança anti-loop ────────────────────────────────────────
+    # São DEFAULTS do servidor: um request que mande seus próprios valores
+    # sobrescreve. Sem isto, um cliente que envia temperature=0 e nenhuma
+    # penalidade (padrão de agentes/tools) faz o modelo entrar em loop até
+    # estourar o contexto. DRY pune só repetição LITERAL de sequências — não
+    # machuca texto/código normal — mas precisa de janela limitada: sobre o
+    # contexto inteiro (default -1) passa a punir o próprio estilo do modelo em
+    # sessão longa e induz EOS precoce a partir de ~8k tokens de saída acumulada
+    # (A/B multi-turno 2026-06-11). Pelo mesmo motivo não usar presence-penalty
+    # como default — taxa todo token já visto, sem janela.
+    cmd += ' --dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 4'
+    cmd += ' --dry-penalty-last-n 2048'
+    # repeat-penalty mexe no logit ANTES da escolha, então corta loop até em
+    # temperature=0 (greedy), onde DRY não vence a margem do argmax. 1.1 é leve.
+    cmd += ' --repeat-penalty 1.1 --repeat-last-n 256'
+    # Quando o contexto enche, descartar tokens antigos em silêncio apaga o
+    # system prompt + schema das tools — é aí que "tools que sempre funcionam"
+    # passam a falhar. --no-context-shift devolve erro limpo: o agente compacta
+    # e retenta, em vez de degradar sem aviso.
+    cmd += ' --no-context-shift'
+
     if reasoning_budget is not None:
         if reasoning_budget == 0:
             cmd += ' --reasoning off'
         else:
+            # --reasoning on liga enable_thinking no template. Obrigatório para
+            # modelos cujo template tem thinking OFF por padrão (ex.: Gemma 4);
+            # nos que já pensam por padrão (Qwen3) é redundante mas inofensivo.
+            cmd += ' --reasoning on'
             cmd += f' --reasoning-budget {reasoning_budget}'
 
     # preserve_thinking: mantém os blocos <think> de turnos ANTERIORES no
@@ -2762,6 +2915,14 @@ def build_command(
 
     if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
         cmd += f' --spec-type draft-mtp --spec-draft-n-max {spec_draft_n_max}'
+
+    # DFlash: drafter GGUF separado na GPU (-md/-ngld). --spec-dflash-default é o
+    # preset do fork buun (liga spec-type dflash + tuning n_max=7/p_min=0; exige
+    # -md). NÃO passamos -cd: o llama-server deste fork não registra essa opção
+    # (rejeita 'invalid argument: -cd') e o preset já auto-seta o ctx do rascunho
+    # pra 256. Só entra no backend dflash com drafter.
+    if BACKENDS[backend].get("supports_spec_dflash") and spec_dflash_draft and Path(spec_dflash_draft).exists():
+        cmd += f' -md "{spec_dflash_draft}" --spec-dflash-default -ngld 99'
 
     # Prompt cache em RAM do sistema (não VRAM). Valor baixo causa cancelamento
     # do cliente em prompts grandes: cache miss → reprefill de ~100k tokens →
@@ -2793,6 +2954,7 @@ def build_cli_command(
     max_tokens:       int,
     n_cpu_moe:        int = 0,
     spec_draft_n_max: int = 2,
+    spec_dflash_draft: str | None = None,
     mmproj:           Path | None = None,
     verbose:          bool = False,
 ) -> str:
@@ -2822,10 +2984,23 @@ def build_cli_command(
     cmd += f' -t {threads_gen} -tb {threads_batch}'
     cmd += f' -n {max_tokens}'
 
+    # Rede de segurança anti-loop (ver build_command). No CLI interativo não
+    # passamos --no-context-shift: numa conversa de terminal é melhor o shift
+    # do que a sessão morrer com erro ao encher o contexto.
+    cmd += ' --dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 4'
+    cmd += ' --dry-penalty-last-n 2048'
+    # repeat-penalty mexe no logit ANTES da escolha, então corta loop até em
+    # temperature=0 (greedy), onde DRY não vence a margem do argmax. 1.1 é leve.
+    cmd += ' --repeat-penalty 1.1 --repeat-last-n 256'
+
     if reasoning_budget is not None:
         if reasoning_budget == 0:
             cmd += ' --reasoning off'
         else:
+            # --reasoning on liga enable_thinking no template. Obrigatório para
+            # modelos cujo template tem thinking OFF por padrão (ex.: Gemma 4);
+            # nos que já pensam por padrão (Qwen3) é redundante mas inofensivo.
+            cmd += ' --reasoning on'
             cmd += f' --reasoning-budget {reasoning_budget}'
 
     if mlock:
@@ -2833,6 +3008,9 @@ def build_cli_command(
 
     if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
         cmd += f' --spec-type draft-mtp --spec-draft-n-max {spec_draft_n_max}'
+
+    if BACKENDS[backend].get("supports_spec_dflash") and spec_dflash_draft and Path(spec_dflash_draft).exists():
+        cmd += f' -md "{spec_dflash_draft}" --spec-dflash-default -ngld 99'
 
     cmd += ' --conversation'
 
@@ -2954,6 +3132,8 @@ def main():
         print(f"│  Ctx Checkpoints : {cc_str}")
         if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
             print(f"│  Spec MTP n-max  : {prev_cfg.get('spec_draft_n_max', 2)}")
+        if BACKENDS[backend].get("supports_spec_dflash") and prev_cfg.get("spec_dflash_draft"):
+            print(f"│  DFlash drafter  : {Path(prev_cfg['spec_dflash_draft']).name}")
         print(f"│  Verbose         : {prev_cfg.get('verbose', False)}")
         print("└───────────────────────────────────────────────────────────")
         print()
@@ -2970,7 +3150,7 @@ def main():
             parallel_slots   = prev_cfg.get("parallel_slots", 1)
             reasoning_budget = prev_cfg.get("reasoning_budget")
             mlock            = prev_cfg.get("mlock", True)
-            max_tokens       = prev_cfg.get("max_tokens", -1)
+            max_tokens       = prev_cfg.get("max_tokens", 8_192)
             batch_size       = prev_cfg.get("batch_size", 2_048)
             ubatch_size      = prev_cfg.get("ubatch_size", 512)
             threads_gen      = prev_cfg.get("threads_gen", CPU_THREADS_GEN)
@@ -2978,6 +3158,14 @@ def main():
             cache_ram        = prev_cfg.get("cache_ram", 24_576)
             ctx_checkpoints  = prev_cfg.get("ctx_checkpoints", 8)
             spec_draft_n_max = int(prev_cfg.get("spec_draft_n_max", 2) or 2)
+            # Revalida o drafter salvo; se sumiu, re-detecta (auto se houver um só).
+            spec_dflash_draft = prev_cfg.get("spec_dflash_draft")
+            if BACKENDS[backend].get("supports_spec_dflash"):
+                if not (spec_dflash_draft and Path(spec_dflash_draft).exists()):
+                    d = select_dflash_drafter(model_path)
+                    spec_dflash_draft = str(d) if d else None
+            else:
+                spec_dflash_draft = None
             verbose          = prev_cfg.get("verbose", False)
             use_mmproj: Path | None = None
             if prev_cfg.get("mmproj"):
@@ -3199,6 +3387,13 @@ def main():
                 return
             print()
 
+        # ── speculative decoding DFlash (só backend dflash + drafter GGUF) ──
+        spec_dflash_draft: str | None = None
+        if BACKENDS[backend].get("supports_spec_dflash"):
+            d = select_dflash_drafter(model_path)
+            spec_dflash_draft = str(d) if d else None
+            print()
+
         # ── seção 4: otimizações de geração ──────────────────────────────────
         mlock = questionary.confirm(
             "🔒 Travar modelo na RAM? (--mlock)",
@@ -3243,22 +3438,26 @@ def main():
         kv_cache = new_kv
 
     # ── preserve_thinking ────────────────────────────────────────────────────
-    # Liga --chat-template-kwargs '{"preserve_thinking": true}' automaticamente
-    # quando as três condições batem:
+    # Pergunta se deve ligar --chat-template-kwargs '{"preserve_thinking": true}'
+    # — mas só quando faz sentido, isto é, quando as três condições batem:
     #   1. modo server (só ali entra --jinja, que o kwarg exige);
     #   2. reasoning ligado (budget != None e != 0 — sem <think>, não há o que
     #      preservar);
     #   3. o template do modelo realmente expõe a variável `preserve_thinking`.
-    # O binário ainda é checado via --help; se faltar suporte, o auto-degrade
-    # remove a flag na primeira queda.
+    # Fora desses casos não há o que decidir e fica OFF. O default do prompt é
+    # ON (a decisão automática antiga). O binário ainda é checado via --help; se
+    # faltar suporte, o auto-degrade remove a flag na primeira queda.
     preserve_thinking = False
     if mode == "server" and reasoning_budget not in (None, 0):
         _pt_meta = _gguf_meta(model_path)
         if (_pt_meta and _pt_meta.get("supports_preserve_thinking")
                 and _backend_supports_chat_template_kwargs(backend, "server")):
-            preserve_thinking = True
-            print("   🧠 preserve_thinking: ON — o histórico vai manter os blocos "
-                  "<think> de turnos anteriores (--chat-template-kwargs).")
+            preserve_thinking = bool(questionary.confirm(
+                "🧠 preserve_thinking? (mantém os blocos <think> de turnos "
+                "anteriores no histórico, via --chat-template-kwargs)",
+                default=True,
+            ).ask())
+            print(f"   🧠 preserve_thinking: {'ON' if preserve_thinking else 'OFF'}")
 
     # ── salva configuração ───────────────────────────────────────────────────
     cfg = {
@@ -3281,6 +3480,7 @@ def main():
         "cache_ram":      cache_ram,
         "ctx_checkpoints": ctx_checkpoints,
         "spec_draft_n_max": spec_draft_n_max,
+        "spec_dflash_draft": spec_dflash_draft,
         "mmproj":         str(use_mmproj) if use_mmproj else None,
         "verbose":        verbose,
     }
@@ -3309,6 +3509,7 @@ def main():
             ctx_checkpoints=ctx_checkpoints,
             n_cpu_moe=n_cpu_moe,
             spec_draft_n_max=spec_draft_n_max,
+            spec_dflash_draft=spec_dflash_draft,
             preserve_thinking=preserve_thinking,
             mmproj=use_mmproj,
             verbose=verbose,
@@ -3330,6 +3531,7 @@ def main():
             max_tokens=max_tokens,
             n_cpu_moe=n_cpu_moe,
             spec_draft_n_max=spec_draft_n_max,
+            spec_dflash_draft=spec_dflash_draft,
             mmproj=use_mmproj,
             verbose=verbose,
         )
@@ -3357,6 +3559,8 @@ def main():
         print(f"   n: {max_tokens}  |  {img_status}  |  {verbose_status}")
     if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
         print(f"   spec-mtp: draft-mtp  |  spec-draft-n-max: {spec_draft_n_max}")
+    if BACKENDS[backend].get("supports_spec_dflash") and spec_dflash_draft:
+        print(f"   spec-dflash: {Path(spec_dflash_draft).name}  (--spec-dflash-default)")
     if preserve_thinking:
         print('   chat-template-kwargs: {"preserve_thinking": true}')
     print()

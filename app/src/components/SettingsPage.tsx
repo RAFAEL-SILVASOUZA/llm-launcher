@@ -6,29 +6,30 @@ type Props = {
   onSaved: () => void;
 };
 
-type BackendKey = "turbo" | "vanilla" | "mtp";
-const BACKEND_KEYS: BackendKey[] = ["turbo", "vanilla", "mtp"];
+// mtp não aparece aqui: reusa o build do vanilla (MTP nativo no upstream), então
+// segue o diretório configurado pro vanilla — sem path próprio pra configurar.
+type BackendKey = "turbo" | "vanilla";
+const BACKEND_KEYS: BackendKey[] = ["turbo", "vanilla"];
 
 const BACKEND_LABEL: Record<BackendKey, string> = {
   turbo:   "turbo (turboquant)",
-  vanilla: "vanilla (upstream)",
-  mtp:     "mtp (am17an / MTP speculative)",
+  vanilla: "vanilla (upstream + MTP nativo)",
 };
 
 export function SettingsPage({ onSaved }: Props) {
   const [paths, setPaths] = useState<string[]>([]);
   const [original, setOriginal] = useState<string[]>([]);
 
-  // Diretórios por backend — sempre 3 entradas (turbo/vanilla/mtp). Valor
+  // Diretórios por backend (turbo/vanilla). mtp segue o vanilla. Valor
   // vazio = usa o default exibido como placeholder.
   const [backendDirs, setBackendDirs] = useState<Record<BackendKey, string>>({
-    turbo: "", vanilla: "", mtp: "",
+    turbo: "", vanilla: "",
   });
   const [originalBackendDirs, setOriginalBackendDirs] = useState<Record<BackendKey, string>>({
-    turbo: "", vanilla: "", mtp: "",
+    turbo: "", vanilla: "",
   });
   const [backendDefaults, setBackendDefaults] = useState<Record<BackendKey, string>>({
-    turbo: "", vanilla: "", mtp: "",
+    turbo: "", vanilla: "",
   });
 
   const [loading, setLoading] = useState(true);
@@ -44,7 +45,7 @@ export function SettingsPage({ onSaved }: Props) {
         setPaths(list);
         setOriginal(s.model_paths);
 
-        const cur: Record<BackendKey, string> = { turbo: "", vanilla: "", mtp: "" };
+        const cur: Record<BackendKey, string> = { turbo: "", vanilla: "" };
         for (const k of BACKEND_KEYS) cur[k] = s.backend_paths[k] ?? "";
         setBackendDirs(cur);
         setOriginalBackendDirs(cur);
@@ -102,7 +103,7 @@ export function SettingsPage({ onSaved }: Props) {
       setOriginal(saved.model_paths);
       setPaths(saved.model_paths.length > 0 ? saved.model_paths : [""]);
 
-      const nextBackends: Record<BackendKey, string> = { turbo: "", vanilla: "", mtp: "" };
+      const nextBackends: Record<BackendKey, string> = { turbo: "", vanilla: "" };
       for (const k of BACKEND_KEYS) nextBackends[k] = saved.backend_paths[k] ?? "";
       setBackendDirs(nextBackends);
       setOriginalBackendDirs(nextBackends);

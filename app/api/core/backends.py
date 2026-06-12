@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 
 from . import settings_store
-from .constants import BACKENDS
+from .constants import BACKEND_BINARY_ALIAS, BACKENDS
 
 _BACKEND_HELP_CACHE: dict[tuple[str, str], str] = {}
 _KV_TYPES_CACHE: dict[tuple[str, str], set[str]] = {}
@@ -54,9 +54,11 @@ def backend_binary(backend: str, mode: str) -> Path:
     Resolve a partir de settings: se o usuário configurou um diretório custom
     pro backend, usa esse + o nome do binário hardcoded (preserva
     `llama-server.exe`/`llama-cli.exe`). Caso contrário, default do constants.
+    Backends-alias (mtp→vanilla) resolvem pelo binário do alvo.
     """
-    default = BACKENDS[backend]["server" if mode == "server" else "cli"]
-    custom_dir = settings_store.get_backend_dir(backend)
+    target = BACKEND_BINARY_ALIAS.get(backend, backend)
+    default = BACKENDS[target]["server" if mode == "server" else "cli"]
+    custom_dir = settings_store.get_backend_dir(target)
     if custom_dir is not None:
         return custom_dir / default.name
     return default

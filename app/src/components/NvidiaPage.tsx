@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Cpu, RotateCcw, Loader2, AlertTriangle, Thermometer, Activity, Zap, MemoryStick, LineChart, HardDrive } from "lucide-react";
+import { Cpu, RotateCcw, Loader2, AlertTriangle, Thermometer, Activity, Zap, MemoryStick, LineChart, HardDrive, Lock, Unlock } from "lucide-react";
 import { api } from "../api/client";
 import type { NvidiaStatus, SystemInfo } from "../api/types";
 
@@ -20,6 +20,39 @@ export function NvidiaPage() {
   const [history, setHistory] = useState<Record<number, Sample[]>>({});
   const historyRef = useRef(history);
   historyRef.current = history;
+
+  // Lock de clock da VRAM (P2 fixo @ 10251 MHz). `supported` vem do backend
+  // (tarefas agendadas registradas?); o estado ligado/desligado é derivado do
+  // clocks.mem que o tick de 2 s já traz — sem polling extra.
+  const [lockSupported, setLockSupported] = useState(false);
+  const [lockMhz, setLockMhz] = useState(10251);
+  const [lockBusy, setLockBusy] = useState(false);
+  const [lockError, setLockError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.vramLock()
+      .then((s) => { setLockSupported(s.supported); setLockMhz(s.lock_mhz); })
+      .catch(() => setLockSupported(false));
+  }, []);
+
+  const memClock = status?.available ? parseInt(status.gpus[0]?.["clocks.mem"] ?? "", 10) : NaN;
+  const locked: boolean | null = Number.isFinite(memClock) ? memClock >= lockMhz : null;
+
+  async function toggleLock() {
+    if (locked === null || lockBusy) return;
+    setLockBusy(true);
+    setLockError(null);
+    try {
+      await api.vramLockSet(!locked);
+      // Re-consulta na hora pro botão refletir o novo clock sem esperar o tick.
+      const s = await api.nvidia();
+      setStatus(s);
+    } catch (e) {
+      setLockError((e as Error).message);
+    } finally {
+      setLockBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -72,6 +105,29 @@ export function NvidiaPage() {
           <Cpu className="w-4 h-4" /> NVIDIA status
         </h2>
         <div className="flex-1" />
+        {lockSupported && (
+          <button
+            onClick={toggleLock}
+            disabled={lockBusy || locked === null}
+            title={
+              locked
+                ? `Clock da VRAM travado em ${lockMhz} MHz (evita queda P2→P3 na inferência, +35% t/s; idle ~90 W). Clique para destravar.`
+                : `Clock da VRAM livre (driver pode rebaixar para 5001 MHz na inferência e derrubar o t/s). Clique para travar em ${lockMhz} MHz. O lock religa sozinho no boot.`
+            }
+            className={`text-xs px-2 py-1 rounded flex items-center gap-1 disabled:opacity-50 ${
+              locked
+                ? "bg-emerald-900/60 border border-emerald-700 text-emerald-200 hover:bg-emerald-900"
+                : "bg-ink-800 border border-ink-700 text-ink-300 hover:bg-ink-700"
+            }`}
+          >
+            {lockBusy
+              ? <Loader2 className="w-3 h-3 animate-spin" />
+              : locked
+                ? <Lock className="w-3 h-3" />
+                : <Unlock className="w-3 h-3" />}
+            VRAM lock {locked === null ? "—" : locked ? "ON" : "OFF"}
+          </button>
+        )}
         <label className="text-xs text-ink-400 flex items-center gap-2 cursor-pointer">
           <input
             type="checkbox"
@@ -98,6 +154,12 @@ export function NvidiaPage() {
         {error && (
           <div className="bg-red-950/60 border border-red-800 text-red-200 rounded p-3 text-sm mono">
             {error}
+          </div>
+        )}
+
+        {lockError && (
+          <div className="bg-red-950/60 border border-red-800 text-red-200 rounded p-3 text-sm mono mb-4">
+            VRAM lock: {lockError}
           </div>
         )}
 

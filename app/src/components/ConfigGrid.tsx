@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Square, Pencil, Rocket, Trash2, ScrollText, Plus, Loader2,
-  Copy, ChevronRight, ChevronDown, Brain, Image as ImageIcon, ClipboardCopy, Check,
+  Copy, ChevronRight, ChevronDown, Brain, Image as ImageIcon, ClipboardCopy, Check, RotateCw,
 } from "lucide-react";
 import { api } from "../api/client";
 import type { Estimate, LaunchConfig, ModelInfo } from "../api/types";
@@ -22,6 +22,7 @@ type Props = {
   onNew:         () => void;
   activeLaunchCfg: LaunchConfig | null;
   onStopLaunch:    () => void;
+  onRestartLaunch: () => void;
   onOpenLaunchLogs:() => void;
 };
 
@@ -30,7 +31,7 @@ const cfgKey = (c: LaunchConfig) => `${c.model}|${c.backend}`;
 export function ConfigGrid({
   configs, models, estimates,
   onEdit, onDuplicate, onDelete, onLaunch, onNew,
-  activeLaunchCfg, onStopLaunch, onOpenLaunchLogs,
+  activeLaunchCfg, onStopLaunch, onRestartLaunch, onOpenLaunchLogs,
 }: Props) {
   const [query, setQuery] = useState("");
   const [backendFilter, setBackendFilter] = useState<string>("");
@@ -184,6 +185,7 @@ export function ConfigGrid({
                   onDelete={onDelete}
                   onLaunch={onLaunch}
                   onStopLaunch={onStopLaunch}
+                  onRestartLaunch={onRestartLaunch}
                   onOpenLaunchLogs={onOpenLaunchLogs}
                 />
               );
@@ -213,6 +215,7 @@ type RowProps = {
   onDelete:    (cfg: LaunchConfig) => void;
   onLaunch:    (cfg: LaunchConfig) => void;
   onStopLaunch:    () => void;
+  onRestartLaunch: () => void;
   onOpenLaunchLogs:() => void;
 };
 
@@ -288,6 +291,7 @@ function FragmentRow(p: RowProps) {
             onDelete={p.onDelete}
             onLaunch={p.onLaunch}
             onStopLaunch={p.onStopLaunch}
+            onRestartLaunch={p.onRestartLaunch}
             onOpenLaunchLogs={p.onOpenLaunchLogs}
           />
         </td>
@@ -305,7 +309,7 @@ function FragmentRow(p: RowProps) {
 
 function ActionButtons({
   cfg, isActive,
-  onEdit, onDuplicate, onDelete, onLaunch, onStopLaunch, onOpenLaunchLogs,
+  onEdit, onDuplicate, onDelete, onLaunch, onStopLaunch, onRestartLaunch, onOpenLaunchLogs,
 }: {
   cfg: LaunchConfig; isActive: boolean;
   onEdit:      (cfg: LaunchConfig) => void;
@@ -313,6 +317,7 @@ function ActionButtons({
   onDelete:    (cfg: LaunchConfig) => void;
   onLaunch:    (cfg: LaunchConfig) => void;
   onStopLaunch:    () => void;
+  onRestartLaunch: () => void;
   onOpenLaunchLogs:() => void;
 }) {
   const btnBase = "w-7 h-7 rounded flex items-center justify-center transition-colors";
@@ -337,6 +342,11 @@ function ActionButtons({
             className={`${btnBase} bg-red-900/60 hover:bg-red-800 text-red-100`}
             title="Interromper launch"
           ><Square className="w-3.5 h-3.5" /></button>
+          <button
+            onClick={onRestartLaunch}
+            className={`${btnBase} bg-amber-900/50 hover:bg-amber-800 text-amber-100`}
+            title="Reiniciar server (mesma config, mesma porta) — destrava sem perder o endpoint"
+          ><RotateCw className="w-3.5 h-3.5" /></button>
           <button
             onClick={onOpenLaunchLogs}
             className={`${btnBase} bg-ink-800 hover:bg-ink-700 text-ink-300`}

@@ -19,10 +19,13 @@ import type {
   LaunchConfig,
   LmsLoadResult,
   LmsStatus,
+  McpServer,
+  McpStatus,
   ModelInfo,
   NvidiaStatus,
   Options,
   SystemInfo,
+  VramLockStatus,
 } from "./types";
 
 declare global {
@@ -169,6 +172,8 @@ export const api = {
     }),
   cancelLaunch: (id: string) =>
     jsonFetch<{ ok: boolean }>(`/api/launch/${id}/cancel`, { method: "POST" }),
+  restartLaunch: (id: string) =>
+    jsonFetch<{ ok: boolean }>(`/api/launch/${id}/restart`, { method: "POST" }),
   listLaunches: () =>
     jsonFetch<ActiveLaunch[]>("/api/launches"),
 
@@ -224,13 +229,37 @@ export const api = {
 
   // ─── nvidia ──────────────────────────────────────────────────────────
   nvidia: () => jsonFetch<NvidiaStatus>("/api/nvidia"),
+  vramLock: () => jsonFetch<VramLockStatus>("/api/nvidia/vram-lock"),
+  vramLockSet: (enabled: boolean) =>
+    jsonFetch<VramLockStatus & { ok: boolean }>("/api/nvidia/vram-lock", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // ─── MCP servers ─────────────────────────────────────────────────────
+  mcpList: () => jsonFetch<McpServer[]>("/api/mcp"),
+  mcpSave: (s: { id?: string; name: string; cwd: string; command: string; enabled?: boolean }) =>
+    jsonFetch<{ ok: boolean; server: McpServer; status: McpStatus }>("/api/mcp", {
+      method: "POST",
+      body: JSON.stringify(s),
+    }),
+  mcpDelete: (id: string) =>
+    jsonFetch<{ ok: boolean }>(`/api/mcp/${id}`, { method: "DELETE" }),
+  mcpStart: (id: string) =>
+    jsonFetch<McpStatus>(`/api/mcp/${id}/start`, { method: "POST" }),
+  mcpStop: (id: string) =>
+    jsonFetch<McpStatus>(`/api/mcp/${id}/stop`, { method: "POST" }),
+  mcpLogs: (id: string, limit = 500) =>
+    jsonFetch<{ logs: { ts: number; kind: string; text: string }[] }>(
+      `/api/mcp/${id}/logs?limit=${limit}`,
+    ),
 
   // ─── app settings ────────────────────────────────────────────────────
   getSettings: () => jsonFetch<AppSettings>("/api/settings"),
   // Só envia os campos editáveis — backend_paths_defaults é read-only.
   saveSettings: (settings: {
     model_paths: string[];
-    backend_paths: Partial<Record<"turbo" | "vanilla" | "mtp", string>>;
+    backend_paths: Partial<Record<"turbo" | "vanilla", string>>;
   }) =>
     jsonFetch<AppSettings>("/api/settings", {
       method: "POST",
@@ -246,4 +275,9 @@ export async function eventsStream(launchId: string): Promise<EventSource> {
 export async function downloadEventsStream(downloadId: string): Promise<EventSource> {
   const base = await apiBase();
   return new EventSource(`${base}/api/hf/download/${downloadId}/events`);
+}
+
+export async function mcpEventsStream(serverId: string): Promise<EventSource> {
+  const base = await apiBase();
+  return new EventSource(`${base}/api/mcp/${serverId}/events`);
 }

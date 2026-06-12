@@ -12,7 +12,8 @@ Eventos:
     {"type": "failure",   "category": "OOM_RUNTIME",
                           "excerpt": "...", "attempt": N}      — queda classificada
     {"type": "degrade",   "description": "...",  "config": {…}} — degrau aplicado
-    {"type": "restart",   "attempt": N, "backoff": s}          — vai reiniciar
+    {"type": "restart",   "attempt": N, "backoff": s}          — vai reiniciar (degrade)
+    {"type": "manual_restart", "attempt": N}                   — restart pedido pela UI (mesma config)
     {"type": "giveup",    "reason": "…"}                       — escada esgotada / loop
     {"type": "done"}                                           — terminou normalmente
 """
@@ -48,6 +49,7 @@ class LaunchHandle:
     """
     def __init__(self, attached_pid: int | None = None):
         self._cancelled = False
+        self._restart = False
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
         self._attached_pid: int | None = attached_pid
@@ -83,6 +85,44 @@ class LaunchHandle:
         with self._lock:
             return self._cancelled
 
+    def request_restart(self) -> bool:
+        """Mata o processo atual mas NÃO desiste: o loop resiliente sobe de
+        novo com a MESMA config (sem degradar). Usado pra destravar um server
+        vivo-mas-preso e deixar o cliente (porta fixa) reconectar.
+
+        Retorna False se já foi cancelado ou se não há processo pra reiniciar.
+        """
+        from . import running
+        with self._lock:
+            if self._cancelled:
+                return False
+            pid = self.pid
+            if pid is None:
+                return False
+            self._restart = True
+            # Se já morreu sozinho, o loop já vai reentrar — só sinaliza.
+            if self._proc is not None and self._proc.poll() is not None:
+                return True
+            running.kill_pid_tree(pid)
+            if self._proc is not None:
+                try:
+                    self._proc.wait(timeout=5)
+                except Exception:
+                    pass
+        return True
+
+    def restart_requested(self) -> bool:
+        with self._lock:
+            return self._restart
+
+    def consume_restart(self) -> bool:
+        """Lê-e-limpa o flag de restart de forma atômica."""
+        with self._lock:
+            if self._restart:
+                self._restart = False
+                return True
+            return False
+
     def _set_proc(self, proc: subprocess.Popen) -> None:
         with self._lock:
             self._proc = proc
@@ -110,7 +150,7 @@ def _run_capturing(cmd: str, handle: LaunchHandle, on_line: Callable[[str], None
     load_ts: float | None = None
     assert proc.stdout is not None
     for line in proc.stdout:
-        if handle.cancelled():
+        if handle.cancelled() or handle.restart_requested():
             try:
                 proc.terminate()
             except Exception:
@@ -199,6 +239,21 @@ def run_server_resiliently(
         if handle.cancelled():
             on_event({"type": "giveup", "reason": "cancelled"})
             return
+
+        # Restart manual (botão da UI): sobe de novo com a MESMA config, sem
+        # classificar como falha nem aplicar degrade, e sem contar no limite de
+        # too_many_restarts. Apenas zera o backoff e reentra no loop.
+        if handle.consume_restart():
+            backoff = SERVER_BACKOFF_START
+            on_event({"type": "manual_restart", "attempt": attempt + 1})
+            slept = 0.0
+            while slept < 1.0:
+                if handle.cancelled():
+                    on_event({"type": "giveup", "reason": "cancelled"})
+                    return
+                time.sleep(0.25)
+                slept += 0.25
+            continue
 
         stabilized = load_ts is not None and (time.time() - load_ts) >= STABILIZE_SECONDS
         if rc == 0:

@@ -12,13 +12,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .constants import BACKENDS, CONFIG_FILE, MODELS_DIR
+from .constants import BACKEND_BINARY_ALIAS, BACKENDS, CONFIG_FILE, MODELS_DIR
 
 SETTINGS_FILE = CONFIG_FILE.with_name("app_settings.json")
 
-# Backends cujo diretório o usuário pode customizar pela UI. Mantemos fixo —
-# adicionar/remover backend continua sendo mudança de código.
-CONFIGURABLE_BACKENDS = tuple(BACKENDS.keys())
+# Backends cujo diretório o usuário pode customizar pela UI. Backends-alias
+# (ex: mtp, que reusa o build do vanilla) ficam de fora: não têm binário
+# próprio, então seguem o path do alvo e não viram linha no Settings.
+CONFIGURABLE_BACKENDS = tuple(k for k in BACKENDS if k not in BACKEND_BINARY_ALIAS)
 
 
 def _read_raw(path: Path = SETTINGS_FILE) -> dict:
@@ -67,15 +68,19 @@ def _read_backend_paths(path: Path = SETTINGS_FILE) -> dict[str, str]:
 
 
 def get_backend_dir(backend: str, path: Path = SETTINGS_FILE) -> Path | None:
-    """Diretório dos binários daquele backend, se configurado pelo usuário."""
-    raw = _read_backend_paths(path).get(backend)
+    """Diretório dos binários daquele backend, se configurado pelo usuário.
+    Backends-alias (mtp→vanilla) herdam o override do alvo."""
+    target = BACKEND_BINARY_ALIAS.get(backend, backend)
+    raw = _read_backend_paths(path).get(target)
     return Path(raw) if raw else None
 
 
 def default_backend_dir(backend: str) -> Path:
     """Diretório default (parent do binário em constants.BACKENDS).
-    Assumimos server e cli no mesmo diretório — é o layout do CMake build."""
-    return BACKENDS[backend]["server"].parent
+    Assumimos server e cli no mesmo diretório — é o layout do CMake build.
+    Backends-alias (mtp→vanilla) herdam o default do alvo."""
+    target = BACKEND_BINARY_ALIAS.get(backend, backend)
+    return BACKENDS[target]["server"].parent
 
 
 def read_settings(path: Path = SETTINGS_FILE) -> dict:

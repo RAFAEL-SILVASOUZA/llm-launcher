@@ -57,10 +57,30 @@ def build_server_command(
     cmd += f' -np {parallel_slots}'
     cmd += f' -n {max_tokens}'
 
+    # Rede de segurança anti-loop (DEFAULTS do servidor; request pode sobrescrever).
+    # Sem isto, cliente com temperature=0 e sem penalidade entra em loop até
+    # estourar o contexto. DRY pune só repetição literal, mas precisa de janela
+    # limitada: sobre o contexto inteiro (default -1) passa a punir o próprio
+    # estilo do modelo em sessão longa e induz EOS precoce a partir de ~8k tokens
+    # de saída acumulada (A/B multi-turno 2026-06-11). Pelo mesmo motivo não usar
+    # presence-penalty como default — taxa todo token já visto, sem janela.
+    cmd += ' --dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 4'
+    cmd += ' --dry-penalty-last-n 2048'
+    # repeat-penalty mexe no logit ANTES da escolha, então corta loop até em
+    # temperature=0 (greedy), onde DRY não vence a margem do argmax. 1.1 é leve.
+    cmd += ' --repeat-penalty 1.1 --repeat-last-n 256'
+    # Não descarta tokens antigos em silêncio (perde system prompt + tools) quando
+    # o contexto enche — devolve erro limpo pro agente compactar e retentar.
+    cmd += ' --no-context-shift'
+
     if reasoning_budget is not None:
         if reasoning_budget == 0:
             cmd += ' --reasoning off'
         else:
+            # --reasoning on liga enable_thinking no template. Obrigatório para
+            # modelos cujo template tem thinking OFF por padrão (ex.: Gemma 4);
+            # nos que já pensam por padrão (Qwen3) é redundante mas inofensivo.
+            cmd += ' --reasoning on'
             cmd += f' --reasoning-budget {reasoning_budget}'
 
     if preserve_thinking:
@@ -118,10 +138,22 @@ def build_cli_command(
     cmd += f' -t {threads_gen} -tb {threads_batch}'
     cmd += f' -n {max_tokens}'
 
+    # Rede de segurança anti-loop (ver build_server_command). Sem --no-context-shift
+    # no CLI: numa conversa de terminal o shift é melhor que morrer com erro.
+    cmd += ' --dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 4'
+    cmd += ' --dry-penalty-last-n 2048'
+    # repeat-penalty mexe no logit ANTES da escolha, então corta loop até em
+    # temperature=0 (greedy), onde DRY não vence a margem do argmax. 1.1 é leve.
+    cmd += ' --repeat-penalty 1.1 --repeat-last-n 256'
+
     if reasoning_budget is not None:
         if reasoning_budget == 0:
             cmd += ' --reasoning off'
         else:
+            # --reasoning on liga enable_thinking no template. Obrigatório para
+            # modelos cujo template tem thinking OFF por padrão (ex.: Gemma 4);
+            # nos que já pensam por padrão (Qwen3) é redundante mas inofensivo.
+            cmd += ' --reasoning on'
             cmd += f' --reasoning-budget {reasoning_budget}'
 
     if mlock:
@@ -156,7 +188,7 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
             threads_batch=cfg.get("threads_batch", CPU_THREADS_BATCH),
             reasoning_budget=cfg.get("reasoning_budget"),
             mlock=cfg.get("mlock", True),
-            max_tokens=cfg.get("max_tokens", -1),
+            max_tokens=cfg.get("max_tokens", 8_192),
             cache_ram=cfg.get("cache_ram", 8_192),
             ctx_checkpoints=cfg.get("ctx_checkpoints", 8),
             n_cpu_moe=cfg.get("n_cpu_moe", 0),
@@ -178,7 +210,7 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
         threads_batch=cfg.get("threads_batch", CPU_THREADS_BATCH),
         reasoning_budget=cfg.get("reasoning_budget"),
         mlock=cfg.get("mlock", True),
-        max_tokens=cfg.get("max_tokens", -1),
+        max_tokens=cfg.get("max_tokens", 8_192),
         n_cpu_moe=cfg.get("n_cpu_moe", 0),
         spec_draft_n_max=cfg.get("spec_draft_n_max", 2),
         mmproj=mmproj,

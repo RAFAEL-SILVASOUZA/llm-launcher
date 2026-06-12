@@ -9,6 +9,8 @@ Endpoints (prefixo /api):
   GET    /backends           — status dos backends (binários, KV types)
   GET    /system             — VRAM total/livre, RAM total
   GET    /nvidia             — status detalhado da GPU
+  GET    /nvidia/vram-lock   — estado do lock de clock da VRAM
+  POST   /nvidia/vram-lock   — liga/desliga o lock (tarefas VRAMLockOn/Off)
 
   GET    /models             — lista de modelos .gguf disponíveis
   POST   /models/meta        — GGUF meta de um path
@@ -59,6 +61,8 @@ from api.core import (  # noqa: E402
     gguf,
     hf,
     lms,
+    mcp_runner,
+    mcp_store,
     models_repo,
     nvidia,
     runner,
@@ -178,6 +182,23 @@ def get_system():
 @app.get("/api/nvidia")
 def get_nvidia():
     return nvidia.nvidia_status()
+
+
+class VramLockRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/nvidia/vram-lock")
+def get_vram_lock():
+    return nvidia.vram_lock_status()
+
+
+@app.post("/api/nvidia/vram-lock")
+def post_vram_lock(req: VramLockRequest):
+    res = nvidia.set_vram_lock(req.enabled)
+    if not res.get("ok"):
+        raise HTTPException(status_code=500, detail=res.get("error"))
+    return res
 
 
 # ─── routes: modelos ──────────────────────────────────────────────────────────
@@ -408,6 +429,27 @@ def launch_cancel(launch_id: str):
         running.deregister(session.id)
         session.queue.put({"type": "giveup", "reason": "cancelled"})
         session.queue.put({"type": "_eof"})
+    return {"ok": True}
+
+
+@app.post("/api/launch/{launch_id}/restart")
+def launch_restart(launch_id: str):
+    """Restart 'soft': mata o llama-server atual e o loop resiliente sobe de
+    novo com a MESMA config (porta fixa → cliente reconecta). Não desiste,
+    não degrada. Serve pra destravar um server vivo-mas-preso."""
+    with _SESSIONS_LOCK:
+        session = _SESSIONS.get(launch_id)
+    if session is None:
+        raise HTTPException(404, "launch_id desconhecido")
+    if session.done:
+        raise HTTPException(400, "launch já encerrado — use Launch pra subir de novo")
+    if session.attached:
+        # Órfão reanexado: não há thread/loop pra ressubir, só o PID.
+        raise HTTPException(
+            400, "sessão reanexada não pode reiniciar (sem config/loop ativo)")
+    ok = session.handle.request_restart()
+    if not ok:
+        raise HTTPException(409, "não foi possível reiniciar (cancelado ou sem processo)")
     return {"ok": True}
 
 
@@ -647,6 +689,93 @@ class LmsLoadRequest(BaseModel):
 @app.post("/api/lms/load")
 def lms_load(req: LmsLoadRequest):
     return lms.load_via_lms(Path(req.model), req.context_window, req.parallel_slots)
+
+
+# ─── routes: MCP servers ──────────────────────────────────────────────────────
+
+class McpServerPayload(BaseModel):
+    id: str | None = None
+    name: str = ""
+    cwd: str = ""
+    command: str = ""
+    enabled: bool = False
+
+
+@app.get("/api/mcp")
+def mcp_list():
+    """Lista servers + status vivo de cada um."""
+    servers = mcp_store.list_servers()
+    statuses = mcp_runner.list_status()
+    out = []
+    for s in servers:
+        sid = s.get("id", "")
+        out.append({**s, "status": statuses.get(sid, mcp_runner.status_for(sid))})
+    return out
+
+
+@app.post("/api/mcp")
+def mcp_upsert(payload: McpServerPayload):
+    data = payload.model_dump()
+    entry = mcp_store.upsert_server(data)
+    return {"ok": True, "server": entry, "status": mcp_runner.status_for(entry["id"])}
+
+
+@app.delete("/api/mcp/{server_id}")
+def mcp_delete(server_id: str):
+    # Para o processo antes de remover do disco, pra não deixar órfão.
+    try:
+        mcp_runner.stop(server_id)
+    except Exception:
+        pass
+    removed = mcp_store.delete_server(server_id)
+    return {"ok": removed}
+
+
+@app.post("/api/mcp/{server_id}/start")
+def mcp_start(server_id: str):
+    try:
+        return mcp_runner.start(server_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/mcp/{server_id}/stop")
+def mcp_stop(server_id: str):
+    return mcp_runner.stop(server_id)
+
+
+@app.get("/api/mcp/{server_id}/logs")
+def mcp_logs(server_id: str, limit: int = 500):
+    return {"logs": mcp_runner.get_logs(server_id, limit=limit)}
+
+
+@app.get("/api/mcp/{server_id}/events")
+async def mcp_events(server_id: str, request: Request):
+    inst = mcp_runner.get_instance(server_id)
+    if inst is None:
+        raise HTTPException(404, "servidor MCP não está em execução")
+    q = inst.subscribe()
+
+    async def generator():
+        try:
+            # Backfill: manda o buffer atual antes de seguir streaming.
+            for ev in list(inst.log):
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    ev = q.get(timeout=0.5)
+                except Empty:
+                    yield ": keepalive\n\n"
+                    continue
+                if ev.get("kind") == "_eof":
+                    return
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        finally:
+            inst.unsubscribe(q)
+
+    return StreamingResponse(generator(), media_type="text/event-stream")
 
 
 # ─── bootstrap: porta livre + arquivo + stdout ────────────────────────────────

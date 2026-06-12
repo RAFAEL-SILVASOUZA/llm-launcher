@@ -142,7 +142,7 @@ export function ConfigEditor({
   const backend = backends.find((b) => b.name === cfg.backend);
   const isThinkingModel = useMemo(() => {
     const lower = cfg.model.toLowerCase();
-    return ["qwen3", "qwq", "deepseek-r1", "thinking", "reasoning"].some((k) => lower.includes(k));
+    return ["qwen3", "qwq", "deepseek-r1", "thinking", "reasoning", "gemma-4", "gemma4"].some((k) => lower.includes(k));
   }, [cfg.model]);
 
   const modelInfo = models.find((m) => m.path === cfg.model);

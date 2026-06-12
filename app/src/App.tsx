@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Settings, HardDrive, Download, Cpu, Loader2, SlidersHorizontal } from "lucide-react";
+import { Settings, HardDrive, Download, Cpu, Loader2, SlidersHorizontal, Plug } from "lucide-react";
 import { api, downloadEventsStream } from "./api/client";
 import type {
   BackendStatus, Estimate, HfDownloadEvent, HfDownloadPlan, LaunchConfig,
@@ -12,12 +12,13 @@ import { ConfigGrid } from "./components/ConfigGrid";
 import { DownloadPage } from "./components/DownloadPage";
 import { Header } from "./components/Header";
 import { LaunchModal } from "./components/LaunchModal";
+import { MCPPage } from "./components/MCPPage";
 import { ModelsPage } from "./components/ModelsPage";
 import { NvidiaPage } from "./components/NvidiaPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { Tabs } from "./components/Tabs";
 
-type TabId = "configs" | "models" | "download" | "nvidia" | "settings";
+type TabId = "configs" | "models" | "download" | "mcp" | "nvidia" | "settings";
 
 export default function App() {
   const [system, setSystem]       = useState<SystemInfo | null>(null);
@@ -248,6 +249,18 @@ export default function App() {
     await refresh();
   };
 
+  // Restart 'soft': mantém a sessão (mesmo launchId/porta), só pede ao backend
+  // pra matar e ressubir o llama-server com a mesma config. O cliente que
+  // consome a porta fixa reconecta sozinho. Não fecha o modal nem limpa estado.
+  const handleRestartLaunch = async () => {
+    if (!launchId) return;
+    try {
+      await api.restartLaunch(launchId);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const handleOpenLaunchLogs = () => {
     if (launchId) setLaunchModalOpen(true);
   };
@@ -298,6 +311,7 @@ export default function App() {
         ? <Loader2 className="w-4 h-4 animate-spin text-accent-fg" />
         : <Download className="w-4 h-4" />,
     },
+    { id: "mcp"     as TabId,  label: "MCP",      icon: <Plug className="w-4 h-4" /> },
     { id: "nvidia"  as TabId,  label: "NVIDIA",   icon: <Cpu className="w-4 h-4" /> },
     { id: "settings" as TabId, label: "Settings", icon: <SlidersHorizontal className="w-4 h-4" /> },
   ];
@@ -339,6 +353,7 @@ export default function App() {
                 onNew={handleNew}
                 activeLaunchCfg={launchCfg}
                 onStopLaunch={handleStopLaunch}
+                onRestartLaunch={handleRestartLaunch}
                 onOpenLaunchLogs={handleOpenLaunchLogs}
               />
             )}
@@ -357,6 +372,7 @@ export default function App() {
                 onReset={handleResetDownload}
               />
             )}
+            {tab === "mcp"     && <MCPPage />}
             {tab === "nvidia"  && <NvidiaPage />}
             {tab === "settings" && <SettingsPage onSaved={refresh} />}
           </>

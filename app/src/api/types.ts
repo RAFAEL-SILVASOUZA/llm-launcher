@@ -146,6 +146,7 @@ export type LaunchEvent =
   | { type: "failure"; category: string; excerpt: string; attempt: number }
   | { type: "degrade"; description: string; config: LaunchConfig }
   | { type: "restart"; attempt: number; backoff: number }
+  | { type: "manual_restart"; attempt: number }
   | { type: "giveup"; reason: string; failure?: string; excerpt?: string; hint?: string }
   | { type: "done"; attempt: number };
 
@@ -197,6 +198,14 @@ export type NvidiaStatus =
   | { available: false; error: string }
   | { available: true; gpus: Record<string, string>[] };
 
+export type VramLockStatus = {
+  supported: boolean;
+  locked: boolean | null;
+  mem_clock_mhz: number | null;
+  pstate: string | null;
+  lock_mhz: number;
+};
+
 // ─── LM Studio ──────────────────────────────────────────────────────────────
 
 export type LmsStatus = {
@@ -210,9 +219,10 @@ export type LmsStatus = {
 export type AppSettings = {
   model_paths: string[];
   // Override do diretório dos binários por backend. Chave ausente / valor
-  // vazio = usa o default em backend_paths_defaults.
-  backend_paths: Partial<Record<"turbo" | "vanilla" | "mtp", string>>;
-  backend_paths_defaults: Record<"turbo" | "vanilla" | "mtp", string>;
+  // vazio = usa o default em backend_paths_defaults. mtp não entra: reusa o
+  // build do vanilla (MTP nativo no upstream), então segue o path do vanilla.
+  backend_paths: Partial<Record<"turbo" | "vanilla", string>>;
+  backend_paths_defaults: Record<"turbo" | "vanilla", string>;
 };
 
 export type LmsLoadResult = {
@@ -223,6 +233,35 @@ export type LmsLoadResult = {
   load_output?: string;
   rc?: number;
   error?: string;
+};
+
+// ─── MCP servers ───────────────────────────────────────────────────────────
+
+export type McpStatus = {
+  id: string;
+  running: boolean;
+  pid: number | null;
+  started_at: number | null;
+  stopped_at: number | null;
+  last_exit_code: number | null;
+  last_error: string | null;
+  auto_stopped: boolean;
+};
+
+export type McpServer = {
+  id: string;
+  name: string;
+  cwd: string;
+  command: string;
+  enabled: boolean;
+  created_at: number;
+  status: McpStatus;
+};
+
+export type McpLogEvent = {
+  ts: number;
+  kind: "info" | "stdout" | "error" | "_eof";
+  text: string;
 };
 
 // ─── delete model ──────────────────────────────────────────────────────────
