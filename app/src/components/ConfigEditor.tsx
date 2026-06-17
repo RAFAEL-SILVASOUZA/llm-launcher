@@ -41,6 +41,9 @@ const DEFAULT_CFG: LaunchConfig = {
   spec_draft_n_max: 2,
   mmproj: null,
   verbose: false,
+  split_mode: null,
+  tensor_split: null,
+  main_gpu: null,
   mode: "server",
 };
 
@@ -53,6 +56,15 @@ export function ConfigEditor({
   const [estimating, setEstimating] = useState(false);
   const [command, setCommand] = useState<string>("");
   const [saving, setSaving] = useState(false);
+  const [gpuCount, setGpuCount] = useState(0);
+
+  // Quantas GPUs há — decide se mostramos os controles de split multi-GPU.
+  useEffect(() => {
+    if (!open) return;
+    api.system()
+      .then((s) => setGpuCount(s.gpu_count ?? 0))
+      .catch(() => setGpuCount(0));
+  }, [open]);
 
   // (Re)inicializa quando abrir com um initial diferente
   useEffect(() => {
@@ -385,6 +397,68 @@ export function ConfigEditor({
                 ℹ Arch híbrida SSM detectada — reasoning agentic costuma travar
                 com budget&gt;0. Considere --reasoning off.
               </p>
+            )}
+
+            {gpuCount >= 2 && (
+              <div className="mt-3 border-t border-ink-800 pt-3 space-y-3">
+                <p className="text-xs text-ink-400">
+                  🖥️ {gpuCount} GPUs detectadas — por padrão (layer) o llama.cpp
+                  reparte as camadas entre todas, proporcional à VRAM.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Split entre GPUs (-sm)">
+                    <select
+                      value={cfg.split_mode ?? "layer"}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setCfg((c) => ({
+                          ...c,
+                          // "layer" é o default → guarda null pra não poluir o comando
+                          split_mode: v === "layer" ? null : (v as "none" | "row"),
+                          // -mg só faz sentido fora do modo "none"? Na verdade vale
+                          // pra todos, mas só exibimos no none; limpa ao sair dele.
+                          main_gpu: v === "none" ? (c.main_gpu ?? 0) : null,
+                        }));
+                      }}
+                      className={selectCls}
+                    >
+                      <option value="layer">layer — repartir camadas (default)</option>
+                      <option value="none">none — tudo numa GPU só</option>
+                      <option value="row">row — split por linha (raro)</option>
+                    </select>
+                  </Field>
+                  {cfg.split_mode === "none" && (
+                    <Field label={`GPU principal (-mg, 0..${gpuCount - 1})`}>
+                      <input
+                        type="number"
+                        value={cfg.main_gpu ?? 0}
+                        onChange={(e) =>
+                          setCfg((c) => ({ ...c, main_gpu: Number(e.target.value) }))
+                        }
+                        className={inputCls}
+                        min={0}
+                        max={gpuCount - 1}
+                      />
+                    </Field>
+                  )}
+                  {cfg.split_mode !== "none" && (
+                    <Field label="Proporção -ts (vazio = auto por VRAM)">
+                      <input
+                        type="text"
+                        value={cfg.tensor_split ?? ""}
+                        onChange={(e) =>
+                          setCfg((c) => ({
+                            ...c,
+                            tensor_split: e.target.value.trim() || null,
+                          }))
+                        }
+                        placeholder={Array.from({ length: gpuCount }, () => "1").join(",")}
+                        className={inputCls}
+                      />
+                    </Field>
+                  )}
+                </div>
+              </div>
             )}
           </Section>
 

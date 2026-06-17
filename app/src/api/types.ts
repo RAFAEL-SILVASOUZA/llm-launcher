@@ -41,6 +41,7 @@ export type SystemInfo = {
   vram_free_mib: number | null;
   ram_total_mib: number | null;
   ram_avail_mib: number | null;
+  gpu_count?: number;
 };
 
 export type ModelInfo = {
@@ -102,6 +103,10 @@ export type LaunchConfig = {
   spec_draft_n_max: number;
   mmproj: string | null;
   verbose: boolean;
+  // Multi-GPU (opcionais; null/undefined = default do llama.cpp = layer split)
+  split_mode?: "none" | "layer" | "row" | null;
+  tensor_split?: string | null;
+  main_gpu?: number | null;
   mode?: "server" | "cli";
 };
 
@@ -197,14 +202,6 @@ export type HfDownloadEvent =
 export type NvidiaStatus =
   | { available: false; error: string }
   | { available: true; gpus: Record<string, string>[] };
-
-export type VramLockStatus = {
-  supported: boolean;
-  locked: boolean | null;
-  mem_clock_mhz: number | null;
-  pstate: string | null;
-  lock_mhz: number;
-};
 
 // ─── LM Studio ──────────────────────────────────────────────────────────────
 

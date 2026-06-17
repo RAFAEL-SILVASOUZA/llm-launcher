@@ -1,4 +1,5 @@
 """nvidia-smi: VRAM (total/livre/usada), status detalhado e RAM total do sistema."""
+import os
 import subprocess
 import sys
 import time
@@ -31,11 +32,18 @@ def nvidia_smi_path() -> str:
 
 
 def gpu_mem_mib(force_refresh: bool = False) -> tuple[int | None, int | None]:
-    """(total, livre) em MiB. (None, None) se indisponível.
+    """(total, livre) em MiB SOMADOS sobre todas as GPUs. (None, None) se indisp.
+
+    Com 2+ placas e o split-mode default do llama.cpp (layer), os pesos e o KV
+    são repartidos entre as GPUs, então o orçamento relevante é a soma das VRAMs.
+    Antes lia só `splitlines()[0]` (a GPU 0) e subestimava pela metade numa rig
+    de 2 placas. A soma é aproximação de 1ª ordem: presume split proporcional à
+    capacidade (default `-ts`); uma placa pode encher antes da outra em splits
+    manuais desbalanceados — aí o auto-degrade/OOM real é a rede de segurança.
 
     Cache com TTL curto (_VRAM_TTL_SECS) — múltiplas chamadas dentro de uma
     request HTTP reusam o resultado, mas o próximo poll do header pega
-    valores atualizados. Antes era cache eterno, o que travava as barras.
+    valores atualizados.
     """
     global _VRAM_INFO_CACHE
     now = time.time()
@@ -53,13 +61,75 @@ def gpu_mem_mib(force_refresh: bool = False) -> tuple[int | None, int | None]:
             capture_output=True, text=True, encoding="utf-8", timeout=5,
         )
         if r.returncode == 0 and r.stdout.strip():
-            total_s, free_s = (x.strip() for x in r.stdout.strip().splitlines()[0].split(","))
-            _VRAM_INFO_CACHE = (now, (int(total_s), int(free_s)))
+            total = free = 0
+            for line in r.stdout.strip().splitlines():
+                total_s, free_s = (x.strip() for x in line.split(","))
+                total += int(total_s)
+                free  += int(free_s)
+            _VRAM_INFO_CACHE = (now, (total, free))
             return _VRAM_INFO_CACHE[1]
     except Exception:
         pass
     _VRAM_INFO_CACHE = (now, (0, 0))
     return (None, None)
+
+
+def gpu_count() -> int:
+    """Número de GPUs NVIDIA visíveis (0 se nvidia-smi indisponível)."""
+    smi = nvidia_smi_path()
+    try:
+        r = subprocess.run(
+            [smi, "--query-gpu=index", "--format=csv,noheader"],
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+        )
+        if r.returncode == 0:
+            return sum(1 for ln in r.stdout.strip().splitlines() if ln.strip())
+    except Exception:
+        pass
+    return 0
+
+
+def gpu_order_ti_first() -> list[str]:
+    """UUIDs das GPUs com a 3090 Ti na frente (ela vira o device CUDA 0).
+
+    Sem isso o CUDA enumera por slot PCIe: a 3090 (bus 01) vira device 0 e a
+    3090 Ti (bus 04) device 1. Ordenamos por nome ("Ti" primeiro) e devolvemos
+    UUIDs — usar UUID em CUDA_VISIBLE_DEVICES torna a escolha independente de
+    qualquer heurística do driver (FASTEST_FIRST etc.). Lista vazia se indisp.
+    """
+    smi = nvidia_smi_path()
+    try:
+        r = subprocess.run(
+            [smi, "--query-gpu=name,uuid", "--format=csv,noheader"],
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            gpus = []
+            for ln in r.stdout.strip().splitlines():
+                if "," not in ln:
+                    continue
+                name, uuid = (x.strip() for x in ln.split(",", 1))
+                gpus.append((name, uuid))
+            gpus.sort(key=lambda g: 0 if "ti" in g[0].lower() else 1)
+            return [u for _, u in gpus]
+    except Exception:
+        pass
+    return []
+
+
+def cuda_env() -> dict:
+    """os.environ com a 3090 Ti pinada como GPU principal (device CUDA 0).
+
+    Para passar a Popen do llama-server (env=...). Com a Ti em device 0, o
+    default -mg 0 do llama.cpp faz dela a main GPU (KV/escalares) e -sm none
+    roda só nela. Não altera o env do processo atual — só a cópia retornada.
+    """
+    env = dict(os.environ)
+    order = gpu_order_ti_first()
+    if order:
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(order)
+    return env
 
 
 def gpu_total_mib() -> int | None:
@@ -122,85 +192,6 @@ def ram_total_mib() -> int | None:
 
 def ram_avail_mib() -> int | None:
     return _ram_mib_pair()[1]
-
-
-# Lock de clock da VRAM (3090 Ti rebaixa P2->P3 na inferência, -35% t/s).
-# O lock/reset exige admin; o backend roda sem elevação, então o toggle
-# dispara tarefas agendadas SYSTEM pré-registradas com SDDL que permite
-# Authenticated Users iniciá-las. Setup: scripts/setup_vram_lock_tasks.ps1.
-VRAM_LOCK_MHZ = 10251
-_VRAM_LOCK_TASK = {True: "VRAMLockOn", False: "VRAMLockOff"}
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-
-
-def _vram_lock_tasks_available() -> bool:
-    if sys.platform != "win32":
-        return False
-    try:
-        r = subprocess.run(
-            ["schtasks", "/Query", "/TN", _VRAM_LOCK_TASK[True]],
-            capture_output=True, timeout=10, creationflags=_NO_WINDOW,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-def vram_lock_status() -> dict:
-    """Estado do lock de VRAM. `locked` é heurístico: clocks.mem >= 10251.
-
-    Sob carga pesada a GPU pode boostar a 10251 mesmo sem lock, mas em idle
-    (caso típico ao olhar a página) sem lock o clock fica em 405/5001.
-    """
-    smi = nvidia_smi_path()
-    mem_mhz: int | None = None
-    pstate: str | None = None
-    try:
-        r = subprocess.run(
-            [smi, "--query-gpu=clocks.mem,pstate", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, encoding="utf-8", timeout=5,
-            creationflags=_NO_WINDOW,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            mem_s, pstate = (x.strip() for x in r.stdout.strip().splitlines()[0].split(","))
-            mem_mhz = int(mem_s)
-    except Exception:
-        pass
-    return {
-        "supported": _vram_lock_tasks_available(),
-        "locked": (mem_mhz >= VRAM_LOCK_MHZ) if mem_mhz is not None else None,
-        "mem_clock_mhz": mem_mhz,
-        "pstate": pstate,
-        "lock_mhz": VRAM_LOCK_MHZ,
-    }
-
-
-def set_vram_lock(enabled: bool) -> dict:
-    """Liga/desliga o lock disparando a tarefa agendada correspondente."""
-    task = _VRAM_LOCK_TASK[enabled]
-    try:
-        r = subprocess.run(
-            ["schtasks", "/Run", "/TN", task],
-            capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW,
-        )
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout or "").strip()
-        return {
-            "ok": False,
-            "error": f"schtasks /Run {task} falhou: {err}. "
-                     "Rode scripts/setup_vram_lock_tasks.ps1 como admin.",
-        }
-    # schtasks /Run é assíncrono e o P-state demora a transicionar (unlock
-    # leva ~5 s pra cair de 10251 → 405). Polla até o estado refletir o
-    # pedido; se não refletir em 10 s devolve o que tiver (a tarefa rodou).
-    status = vram_lock_status()
-    deadline = time.time() + 10.0
-    while status.get("locked") is not enabled and time.time() < deadline:
-        time.sleep(1.0)
-        status = vram_lock_status()
-    return {"ok": True, **status}
 
 
 def nvidia_status() -> dict:

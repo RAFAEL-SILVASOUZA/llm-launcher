@@ -25,7 +25,6 @@ import type {
   NvidiaStatus,
   Options,
   SystemInfo,
-  VramLockStatus,
 } from "./types";
 
 declare global {
@@ -229,12 +228,6 @@ export const api = {
 
   // ─── nvidia ──────────────────────────────────────────────────────────
   nvidia: () => jsonFetch<NvidiaStatus>("/api/nvidia"),
-  vramLock: () => jsonFetch<VramLockStatus>("/api/nvidia/vram-lock"),
-  vramLockSet: (enabled: boolean) =>
-    jsonFetch<VramLockStatus & { ok: boolean }>("/api/nvidia/vram-lock", {
-      method: "POST",
-      body: JSON.stringify({ enabled }),
-    }),
 
   // ─── MCP servers ─────────────────────────────────────────────────────
   mcpList: () => jsonFetch<McpServer[]>("/api/mcp"),

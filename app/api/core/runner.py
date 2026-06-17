@@ -30,6 +30,7 @@ from .builder import build_command_from_cfg
 from .config_store import append_fail_history, save_config
 from .constants import LOAD_OK_PATTERNS, STABILIZE_SECONDS
 from .failure import Failure, classify_failure, next_degrade
+from .nvidia import cuda_env
 
 EventCallback = Callable[[dict], None]
 
@@ -139,6 +140,7 @@ def _run_capturing(cmd: str, handle: LaunchHandle, on_line: Callable[[str], None
         shlex.split(cmd),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, encoding="utf-8", errors="replace",
+        env=cuda_env(),  # 3090 Ti como device CUDA 0 → main GPU (-mg 0)
     )
     handle._set_proc(proc)
     if on_proc_pid is not None:

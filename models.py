@@ -721,6 +721,7 @@ def run_capturing(cmd: str, on_load: "callable | None" = None) -> tuple[int, str
         cmd, shell=True,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, encoding="utf-8", errors="replace",
+        env=_cuda_env(),  # 3090 Ti como device CUDA 0 → main GPU (-mg 0)
     )
     chunks: list[str] = []
     load_ts: float | None = None
@@ -940,6 +941,9 @@ def _build_cmd_from_cfg(cfg: dict) -> str:
         preserve_thinking=cfg.get("preserve_thinking", False),
         mmproj=Path(mmproj) if mmproj else None,
         verbose=cfg.get("verbose", False),
+        split_mode=cfg.get("split_mode"),
+        tensor_split=cfg.get("tensor_split"),
+        main_gpu=cfg.get("main_gpu"),
     )
 
 
@@ -1730,6 +1734,39 @@ def _nvidia_smi_path() -> str:
     return str(NVIDIA_SMI) if NVIDIA_SMI.exists() else "nvidia-smi"
 
 
+def _cuda_env() -> dict:
+    """os.environ com a 3090 Ti pinada como GPU principal (device CUDA 0).
+
+    Sem isso o CUDA enumera por slot PCIe: a 3090 (bus 01) vira device 0 e a
+    3090 Ti (bus 04) device 1. Ordenamos as GPUs por nome ("Ti" primeiro) e
+    pinamos via UUID em CUDA_VISIBLE_DEVICES — UUID torna a escolha imune a
+    qualquer heurística do driver. Com a Ti em device 0, o default -mg 0 do
+    llama.cpp faz dela a main GPU e -sm none roda só nela. Devolve cópia do
+    env (não altera o processo atual); env intacto se nvidia-smi indisponível.
+    """
+    env = dict(os.environ)
+    smi = _nvidia_smi_path()
+    try:
+        r = subprocess.run(
+            [smi, "--query-gpu=name,uuid", "--format=csv,noheader"],
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            gpus = []
+            for ln in r.stdout.strip().splitlines():
+                if "," not in ln:
+                    continue
+                name, uuid = (x.strip() for x in ln.split(",", 1))
+                gpus.append((name, uuid))
+            gpus.sort(key=lambda g: 0 if "ti" in g[0].lower() else 1)
+            if gpus:
+                env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+                env["CUDA_VISIBLE_DEVICES"] = ",".join(u for _, u in gpus)
+    except Exception:
+        pass
+    return env
+
+
 def nvidia_status_flow() -> None:
     """Mostra o status completo da GPU NVIDIA via nvidia-smi."""
     smi = _nvidia_smi_path()
@@ -2212,11 +2249,16 @@ _RAM_TOTAL_CACHE:  int | None = None
 
 
 def _gpu_mem_mib() -> tuple[int | None, int | None]:
-    """(total, livre) de VRAM em MiB via nvidia-smi. (None, None) se indisponível.
+    """(total, livre) de VRAM em MiB SOMADOS sobre todas as GPUs. (None, None)
+    se indisponível.
 
     A estimativa precisa do espaço *livre*, não do total: o SO/driver/desktop
     seguram ~1-1.5 GB que o llama.cpp nunca vê. Comparar contra o total fazia
     o estimador subestimar a ocupação e não flagrar OOM real.
+
+    Com 2+ placas e split-mode layer (default), pesos e KV se repartem entre as
+    GPUs — o orçamento é a SOMA. Antes lia só a GPU 0 e cortava o budget pela
+    metade numa rig de 2 placas.
     """
     global _VRAM_INFO_CACHE
     if _VRAM_INFO_CACHE is not None:
@@ -2229,8 +2271,12 @@ def _gpu_mem_mib() -> tuple[int | None, int | None]:
             capture_output=True, text=True, encoding="utf-8", timeout=5,
         )
         if r.returncode == 0 and r.stdout.strip():
-            total_s, free_s = (x.strip() for x in r.stdout.strip().splitlines()[0].split(","))
-            _VRAM_INFO_CACHE = (int(total_s), int(free_s))
+            total = free = 0
+            for line in r.stdout.strip().splitlines():
+                total_s, free_s = (x.strip() for x in line.split(","))
+                total += int(total_s)
+                free  += int(free_s)
+            _VRAM_INFO_CACHE = (total, free)
             return _VRAM_INFO_CACHE
     except Exception:
         pass
@@ -2246,6 +2292,25 @@ def _gpu_total_mib() -> int | None:
 def _gpu_free_mib() -> int | None:
     """VRAM livre agora (memory.free) — o que o llama.cpp realmente terá."""
     return _gpu_mem_mib()[1]
+
+
+def _gpu_list() -> list[tuple[int, str, int]]:
+    """[(index, name, total_mib), ...] por GPU. [] se nvidia-smi indisponível."""
+    smi = _nvidia_smi_path()
+    try:
+        r = subprocess.run(
+            [smi, "--query-gpu=index,name,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            out = []
+            for line in r.stdout.strip().splitlines():
+                idx_s, name, tot_s = (x.strip() for x in line.split(","))
+                out.append((int(idx_s), name, int(tot_s)))
+            return out
+    except Exception:
+        pass
+    return []
 
 
 def _ram_total_mib() -> int | None:
@@ -2813,6 +2878,25 @@ def prompt_step_action(label: str, status: str) -> str:
 
 # ─── command builder ──────────────────────────────────────────────────────────
 
+def _multi_gpu_flags(
+    split_mode:   str | None,
+    tensor_split: str | None,
+    main_gpu:     int | None,
+) -> str:
+    """Flags de distribuição entre GPUs (-sm/-ts/-mg). Vazio = default do
+    llama.cpp (split layer entre todas as placas, proporcional à VRAM)."""
+    out = ""
+    if split_mode in ("none", "layer", "row"):
+        out += f" -sm {split_mode}"
+    if tensor_split:
+        ts = tensor_split.strip().replace(" ", "")
+        if ts:
+            out += f" -ts {ts}"
+    if main_gpu is not None and main_gpu >= 0:
+        out += f" -mg {main_gpu}"
+    return out
+
+
 def build_command(
     model_path:       Path,
     backend:          str,
@@ -2836,6 +2920,9 @@ def build_command(
     preserve_thinking: bool = False,
     mmproj:           Path | None = None,
     verbose:          bool = False,
+    split_mode:       str | None = None,
+    tensor_split:     str | None = None,
+    main_gpu:         int | None = None,
 ) -> str:
     alias = make_alias(model_path)
     server_bin = backend_binary(backend, "server")
@@ -2861,6 +2948,7 @@ def build_command(
     # inteiro (semântica "janela por slot" — alinha com o estimador e o aviso).
     cmd += f' -c {context_window * parallel_slots}'
     cmd += f' -ngl {gpu_layers}'
+    cmd += _multi_gpu_flags(split_mode, tensor_split, main_gpu)
     if n_cpu_moe and n_cpu_moe > 0:
         cmd += f' --n-cpu-moe {n_cpu_moe}'
     cmd += f' --cache-type-k {kv_cache} --cache-type-v {kv_cache}'
@@ -2880,11 +2968,15 @@ def build_command(
     # sessão longa e induz EOS precoce a partir de ~8k tokens de saída acumulada
     # (A/B multi-turno 2026-06-11). Pelo mesmo motivo não usar presence-penalty
     # como default — taxa todo token já visto, sem janela.
-    cmd += ' --dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 4'
-    cmd += ' --dry-penalty-last-n 2048'
-    # repeat-penalty mexe no logit ANTES da escolha, então corta loop até em
-    # temperature=0 (greedy), onde DRY não vence a margem do argmax. 1.1 é leve.
-    cmd += ' --repeat-penalty 1.1 --repeat-last-n 256'
+    # DRY REMOVIDO: a premissa "não machuca código" é FALSA. Com --dry-allowed-length 4
+    # ele pune a repetição LEGÍTIMA de código (ex.: `this.getUser('1'), this.getUser('2')`),
+    # forçando o modelo a desviar e corromper o texto — dropar caractere ("thisgetUser"),
+    # trocar dígito ('2'->'3'), trocar aspas. Isso quebra applyPatch/edição exata e foi
+    # comprovado empiricamente (2026-06-17): mesmo prompt acerta de primeira sem DRY.
+    # Anti-loop agora vem de sampling saudável + repeat-penalty LEVE, que NÃO corrompe
+    # reprodução exata: temp/top-p/top-k dão diversidade e 1.05 já corta loop.
+    cmd += ' --temp 0.3 --top-p 0.8 --top-k 20'
+    cmd += ' --repeat-penalty 1.05'
     # Quando o contexto enche, descartar tokens antigos em silêncio apaga o
     # system prompt + schema das tools — é aí que "tools que sempre funcionam"
     # passam a falhar. --no-context-shift devolve erro limpo: o agente compacta
@@ -2957,6 +3049,9 @@ def build_cli_command(
     spec_dflash_draft: str | None = None,
     mmproj:           Path | None = None,
     verbose:          bool = False,
+    split_mode:       str | None = None,
+    tensor_split:     str | None = None,
+    main_gpu:         int | None = None,
 ) -> str:
     cli_bin = backend_binary(backend, "cli")
 
@@ -2976,6 +3071,7 @@ def build_cli_command(
 
     cmd += f' -c {context_window}'
     cmd += f' -ngl {gpu_layers}'
+    cmd += _multi_gpu_flags(split_mode, tensor_split, main_gpu)
     if n_cpu_moe and n_cpu_moe > 0:
         cmd += f' --n-cpu-moe {n_cpu_moe}'
     cmd += f' --cache-type-k {kv_cache} --cache-type-v {kv_cache}'
@@ -2987,11 +3083,12 @@ def build_cli_command(
     # Rede de segurança anti-loop (ver build_command). No CLI interativo não
     # passamos --no-context-shift: numa conversa de terminal é melhor o shift
     # do que a sessão morrer com erro ao encher o contexto.
-    cmd += ' --dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 4'
-    cmd += ' --dry-penalty-last-n 2048'
-    # repeat-penalty mexe no logit ANTES da escolha, então corta loop até em
-    # temperature=0 (greedy), onde DRY não vence a margem do argmax. 1.1 é leve.
-    cmd += ' --repeat-penalty 1.1 --repeat-last-n 256'
+    # DRY REMOVIDO (ver build_command): com --dry-allowed-length 4 ele pune a repetição
+    # LEGÍTIMA de código e corrompe a reprodução exata (dropa caractere, troca dígito/aspas),
+    # quebrando applyPatch. Comprovado empiricamente 2026-06-17. Anti-loop agora via sampling
+    # saudável + repeat-penalty LEVE (1.05), que não corrompe texto exato.
+    cmd += ' --temp 0.3 --top-p 0.8 --top-k 20'
+    cmd += ' --repeat-penalty 1.05'
 
     if reasoning_budget is not None:
         if reasoning_budget == 0:
@@ -3167,6 +3264,9 @@ def main():
             else:
                 spec_dflash_draft = None
             verbose          = prev_cfg.get("verbose", False)
+            split_mode       = prev_cfg.get("split_mode")
+            tensor_split     = prev_cfg.get("tensor_split")
+            main_gpu         = prev_cfg.get("main_gpu")
             use_mmproj: Path | None = None
             if prev_cfg.get("mmproj"):
                 p = Path(prev_cfg["mmproj"])
@@ -3270,6 +3370,44 @@ def main():
             if action == "retry":    continue
             if action == "abort":    return
             break
+
+        # ── Multi-GPU: split entre placas (-sm/-ts/-mg) ──────────────────────
+        # Só pergunta quando há 2+ GPUs. None em tudo = default do llama.cpp
+        # (split layer proporcional à VRAM), que já usa todas as placas.
+        split_mode:   str | None = None
+        tensor_split: str | None = None
+        main_gpu:     int | None = None
+        _gpus = _gpu_list()
+        if len(_gpus) >= 2:
+            print()
+            print("🖥️  Múltiplas GPUs detectadas:")
+            for idx, name, tot in _gpus:
+                print(f"     [{idx}] {name}  ({tot/1024:.0f} GB)")
+            split_choice = questionary.select(
+                "🔀 Como repartir o modelo entre as GPUs?",
+                choices=[
+                    questionary.Choice("layer — repartir camadas entre todas (default, recomendado)", value="layer"),
+                    questionary.Choice("none — carregar tudo numa GPU só (escolho qual)",            value="none"),
+                    questionary.Choice("row — split por linha (raro; pode ser melhor em NVLink)",    value="row"),
+                    questionary.Choice("proporção custom (-ts, ex.: 1,1)",                            value="custom"),
+                ],
+                default="layer",
+            ).ask()
+            if split_choice is None:
+                return
+            if split_choice == "none":
+                split_mode = "none"
+                main_gpu = ask_int(f"   GPU principal (-mg, 0..{len(_gpus)-1})", _gpus[0][0])
+                main_gpu = max(0, min(main_gpu, len(_gpus) - 1))
+            elif split_choice == "row":
+                split_mode = "row"
+            elif split_choice == "custom":
+                split_mode = "layer"
+                tensor_split = questionary.text(
+                    f"   Proporção -ts ({len(_gpus)} valores separados por vírgula)",
+                    default=",".join("1" for _ in _gpus),
+                ).ask() or None
+            # "layer" puro deixa tudo None (é o default do llama.cpp).
 
         # ── MoE: --n-cpu-moe N (só pra modelos com experts) ──────────────────
         n_cpu_moe: int = 0
@@ -3481,6 +3619,9 @@ def main():
         "ctx_checkpoints": ctx_checkpoints,
         "spec_draft_n_max": spec_draft_n_max,
         "spec_dflash_draft": spec_dflash_draft,
+        "split_mode":     split_mode,
+        "tensor_split":   tensor_split,
+        "main_gpu":       main_gpu,
         "mmproj":         str(use_mmproj) if use_mmproj else None,
         "verbose":        verbose,
     }
@@ -3513,6 +3654,9 @@ def main():
             preserve_thinking=preserve_thinking,
             mmproj=use_mmproj,
             verbose=verbose,
+            split_mode=split_mode,
+            tensor_split=tensor_split,
+            main_gpu=main_gpu,
         )
     else:
         cmd = build_cli_command(
@@ -3534,6 +3678,9 @@ def main():
             spec_dflash_draft=spec_dflash_draft,
             mmproj=use_mmproj,
             verbose=verbose,
+            split_mode=split_mode,
+            tensor_split=tensor_split,
+            main_gpu=main_gpu,
         )
     alias      = make_alias(model_path)
     mode_label = "llama-server" if mode == "server" else "llama-cli"

@@ -11,6 +11,32 @@ class BackendBinaryMissing(Exception):
     """Disparado quando o .exe do backend escolhido não existe."""
 
 
+def _multi_gpu_flags(
+    split_mode:   str | None,
+    tensor_split: str | None,
+    main_gpu:     int | None,
+) -> str:
+    """Flags de distribuição entre GPUs (-sm/-ts/-mg).
+
+    Vazio quando nada foi setado → llama.cpp usa o default (split-mode layer,
+    repartindo as camadas entre todas as GPUs proporcional à VRAM). Só emite
+    o que o usuário escolheu explicitamente.
+      -sm none|layer|row  como repartir (none = tudo na main-gpu)
+      -ts a,b[,...]       proporção por GPU (ex.: "1,1" = meio a meio)
+      -mg i               GPU principal (recebe KV/escalares; índice base-0)
+    """
+    out = ""
+    if split_mode in ("none", "layer", "row"):
+        out += f" -sm {split_mode}"
+    if tensor_split:
+        ts = tensor_split.strip().replace(" ", "")
+        if ts:
+            out += f" -ts {ts}"
+    if main_gpu is not None and main_gpu >= 0:
+        out += f" -mg {main_gpu}"
+    return out
+
+
 def build_server_command(
     model_path:       Path,
     backend:          str,
@@ -33,6 +59,9 @@ def build_server_command(
     preserve_thinking: bool = False,
     mmproj:           Path | None = None,
     verbose:          bool = False,
+    split_mode:       str | None = None,
+    tensor_split:     str | None = None,
+    main_gpu:         int | None = None,
     host:             str = "0.0.0.0",
     port:             int = 1234,
 ) -> str:
@@ -48,6 +77,7 @@ def build_server_command(
     cmd += f' --alias "{alias}"'
     cmd += f' -c {context_window * parallel_slots}'
     cmd += f' -ngl {gpu_layers}'
+    cmd += _multi_gpu_flags(split_mode, tensor_split, main_gpu)
     if n_cpu_moe and n_cpu_moe > 0:
         cmd += f' --n-cpu-moe {n_cpu_moe}'
     cmd += f' --cache-type-k {kv_cache} --cache-type-v {kv_cache}'
@@ -64,11 +94,15 @@ def build_server_command(
     # estilo do modelo em sessão longa e induz EOS precoce a partir de ~8k tokens
     # de saída acumulada (A/B multi-turno 2026-06-11). Pelo mesmo motivo não usar
     # presence-penalty como default — taxa todo token já visto, sem janela.
-    cmd += ' --dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 4'
-    cmd += ' --dry-penalty-last-n 2048'
-    # repeat-penalty mexe no logit ANTES da escolha, então corta loop até em
-    # temperature=0 (greedy), onde DRY não vence a margem do argmax. 1.1 é leve.
-    cmd += ' --repeat-penalty 1.1 --repeat-last-n 256'
+    # DRY REMOVIDO: a premissa "pune só repetição literal, não machuca código" é FALSA.
+    # Com --dry-allowed-length 4 ele pune a repetição LEGÍTIMA de código (ex.:
+    # `this.getUser('1'), this.getUser('2')`), forçando o modelo a desviar e corromper o
+    # texto — dropar caractere ("thisgetUser"), trocar dígito ('2'->'3'), trocar aspas.
+    # Quebra applyPatch/edição exata; comprovado empiricamente (2026-06-17): mesmo prompt
+    # acerta de primeira sem DRY. Anti-loop agora via sampling saudável + repeat-penalty
+    # LEVE (1.05), que não corrompe reprodução exata.
+    cmd += ' --temp 0.3 --top-p 0.8 --top-k 20'
+    cmd += ' --repeat-penalty 1.05'
     # Não descarta tokens antigos em silêncio (perde system prompt + tools) quando
     # o contexto enche — devolve erro limpo pro agente compactar e retentar.
     cmd += ' --no-context-shift'
@@ -119,6 +153,9 @@ def build_cli_command(
     spec_draft_n_max: int = 2,
     mmproj:           Path | None = None,
     verbose:          bool = False,
+    split_mode:       str | None = None,
+    tensor_split:     str | None = None,
+    main_gpu:         int | None = None,
 ) -> str:
     cli_bin = backend_binary(backend, "cli")
     if not cli_bin.exists():
@@ -130,6 +167,7 @@ def build_cli_command(
 
     cmd += f' -c {context_window}'
     cmd += f' -ngl {gpu_layers}'
+    cmd += _multi_gpu_flags(split_mode, tensor_split, main_gpu)
     if n_cpu_moe and n_cpu_moe > 0:
         cmd += f' --n-cpu-moe {n_cpu_moe}'
     cmd += f' --cache-type-k {kv_cache} --cache-type-v {kv_cache}'
@@ -140,11 +178,12 @@ def build_cli_command(
 
     # Rede de segurança anti-loop (ver build_server_command). Sem --no-context-shift
     # no CLI: numa conversa de terminal o shift é melhor que morrer com erro.
-    cmd += ' --dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 4'
-    cmd += ' --dry-penalty-last-n 2048'
-    # repeat-penalty mexe no logit ANTES da escolha, então corta loop até em
-    # temperature=0 (greedy), onde DRY não vence a margem do argmax. 1.1 é leve.
-    cmd += ' --repeat-penalty 1.1 --repeat-last-n 256'
+    # DRY REMOVIDO (ver build_server_command): com --dry-allowed-length 4 ele pune a
+    # repetição LEGÍTIMA de código e corrompe a reprodução exata (dropa caractere, troca
+    # dígito/aspas), quebrando applyPatch. Comprovado 2026-06-17. Anti-loop agora via
+    # sampling saudável + repeat-penalty LEVE (1.05).
+    cmd += ' --temp 0.3 --top-p 0.8 --top-k 20'
+    cmd += ' --repeat-penalty 1.05'
 
     if reasoning_budget is not None:
         if reasoning_budget == 0:
@@ -196,6 +235,9 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
             preserve_thinking=cfg.get("preserve_thinking", False),
             mmproj=mmproj,
             verbose=cfg.get("verbose", False),
+            split_mode=cfg.get("split_mode"),
+            tensor_split=cfg.get("tensor_split"),
+            main_gpu=cfg.get("main_gpu"),
         )
     return build_cli_command(
         model_path=model_path,
@@ -215,4 +257,7 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
         spec_draft_n_max=cfg.get("spec_draft_n_max", 2),
         mmproj=mmproj,
         verbose=cfg.get("verbose", False),
+        split_mode=cfg.get("split_mode"),
+        tensor_split=cfg.get("tensor_split"),
+        main_gpu=cfg.get("main_gpu"),
     )

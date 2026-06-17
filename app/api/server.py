@@ -9,8 +9,6 @@ Endpoints (prefixo /api):
   GET    /backends           — status dos backends (binários, KV types)
   GET    /system             — VRAM total/livre, RAM total
   GET    /nvidia             — status detalhado da GPU
-  GET    /nvidia/vram-lock   — estado do lock de clock da VRAM
-  POST   /nvidia/vram-lock   — liga/desliga o lock (tarefas VRAMLockOn/Off)
 
   GET    /models             — lista de modelos .gguf disponíveis
   POST   /models/meta        — GGUF meta de um path
@@ -110,6 +108,10 @@ class LaunchConfig(BaseModel):
     spec_draft_n_max: int = 2
     mmproj: str | None = None
     verbose: bool = False
+    # Multi-GPU (opcionais; None = default do llama.cpp = layer split entre todas)
+    split_mode: str | None = None      # "none" | "layer" | "row"
+    tensor_split: str | None = None    # ex.: "1,1" (meio a meio entre 2 GPUs)
+    main_gpu: int | None = None        # índice base-0 da GPU principal
     mode: str = "server"   # "server" | "cli" — só usado por build/estimate, não persiste
 
 
@@ -176,29 +178,13 @@ def get_system():
         "vram_free_mib":  nvidia.gpu_free_mib(),
         "ram_total_mib":  total,
         "ram_avail_mib":  avail,
+        "gpu_count":      nvidia.gpu_count(),
     }
 
 
 @app.get("/api/nvidia")
 def get_nvidia():
     return nvidia.nvidia_status()
-
-
-class VramLockRequest(BaseModel):
-    enabled: bool
-
-
-@app.get("/api/nvidia/vram-lock")
-def get_vram_lock():
-    return nvidia.vram_lock_status()
-
-
-@app.post("/api/nvidia/vram-lock")
-def post_vram_lock(req: VramLockRequest):
-    res = nvidia.set_vram_lock(req.enabled)
-    if not res.get("ok"):
-        raise HTTPException(status_code=500, detail=res.get("error"))
-    return res
 
 
 # ─── routes: modelos ──────────────────────────────────────────────────────────

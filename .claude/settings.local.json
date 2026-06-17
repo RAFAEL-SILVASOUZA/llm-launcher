@@ -117,7 +117,28 @@
       "Bash(findstr -i \"llama-server\")",
       "PowerShell(Get-ScheduledTask *)",
       "PowerShell(Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\\\\Users\\\\PC\\\\llm\\\\scripts\\\\setup_vram_lock_tasks.ps1'; Write-Host \"elevated run finished\")",
-      "PowerShell(schtasks *)"
+      "PowerShell(schtasks *)",
+      "PowerShell(python -m py_compile models.py app/api/server.py app/api/core/nvidia.py app/api/core/builder.py app/api/core/estimator.py; if \\($?\\) { \"OK\" })",
+      "PowerShell(cd app *)",
+      "PowerShell(npx tsc --noEmit 2>&1 | Select-Object -First 40)",
+      "PowerShell(python _mgpu_check.py)",
+      "PowerShell(python -m py_compile models.py app/api/server.py app/api/core/nvidia.py app/api/core/builder.py; if \\($?\\) { \"PY OK\" })",
+      "Bash(echo \"exit: $?\")",
+      "PowerShell(& \"C:\\\\Windows\\\\System32\\\\nvidia-smi.exe\" --query-gpu=index,name,temperature.gpu,fan.speed,utilization.gpu,clocks.sm,clocks.mem,pstate,power.draw,power.limit,clocks_throttle_reasons.active --format=csv,noheader)",
+      "PowerShell(& \"C:\\\\Windows\\\\System32\\\\nvidia-smi.exe\" --query-gpu=index,name,temperature.gpu,temperature.memory --format=csv,noheader)",
+      "PowerShell(& \"C:\\\\Windows\\\\System32\\\\nvidia-smi.exe\" --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader)",
+      "PowerShell(& \"C:\\\\Windows\\\\System32\\\\nvidia-smi.exe\" --query-gpu=index,uuid --format=csv,noheader)",
+      "PowerShell(\"=== throttle decode ===\")",
+      "PowerShell(\"GPU0 \\(3090\\) reason 0x20 = SW Thermal Slowdown \\(driver cortando clock por temperatura\\)\")",
+      "PowerShell(\"=== mem junction temp \\(se a placa expoe\\) ===\")",
+      "PowerShell(\"=== processos na GPU ===\")",
+      "PowerShell(\"=== map uuid->index ===\")",
+      "PowerShell($r = & \"C:\\\\Windows\\\\System32\\\\nvidia-smi.exe\" -i 0 -pl 300 2>&1; \"resultado: $r\")",
+      "PowerShell(git status --short; \"---LOG---\"; git log --oneline -3)",
+      "PowerShell(Start-Process -FilePath \"nvidia-smi\" -ArgumentList \"-i\",\"0\",\"-pl\",\"290\" -Verb RunAs -Wait; \"comando disparado\")",
+      "PowerShell(Get-Item \"C:\\\\Users\\\\PC\\\\.lmstudio\\\\models\\\\unsloth\\\\Qwen3.6-27B-MTP-GGUF\\\\Qwen3.6-27B-UD-Q6_K_XL\\\\Qwen3.6-27B-UD-Q6_K_XL.gguf\" | Select-Object FullName,@{N='GB';E={[math]::Round\\($_.Length/1GB,2\\)}})",
+      "PowerShell(1..6 | ForEach-Object { nvidia-smi --query-gpu=index,utilization.gpu,memory.used,power.draw,pstate,pcie.link.gen.current,pcie.link.width.current --format=csv,noheader; Write-Host \"--- sample $_ ---\"; Start-Sleep -Milliseconds 1500 })",
+      "PowerShell(1..8 | ForEach-Object { nvidia-smi --query-gpu=index,utilization.gpu,memory.used,power.draw,pstate --format=csv,noheader; Write-Host \"--- s$_ ---\"; Start-Sleep -Milliseconds 1500 })"
     ]
   }
 }

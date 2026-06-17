@@ -1,0 +1,45 @@
+﻿
+Loading model... 
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b9542-6b80c74f2
+model      : Qwen3.6-27B-UD-Q6_K_XL.gguf
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+> Escreva uma explicacao tecnica detalhada, com pelo menos 12 frases, sobre como funciona o mecanismo de atencao em transformers, incluindo Q, K, V e softmax. /no_think
+
+[Start thinking]
+Here's a thinking process:
+
+1.  **Analyze User Input:**
+   - **Topic:** Attention mechanism in Transformers
+   - **Key Components to Include:** Q (Query), K (Key), V (Value), softmax
+   - **Format:** Detailed technical explanation
+   - **Length:** At least 12 sentences
+   - **Language:** Portuguese
+   - **Constraint:** `/no_think` (I should just output the final response without showing my thinking process)
+
+2.  **Deconstruct the Technical Content:**
+   - What is attention? It's a mechanism to compute weighted representations of input tokens based on their relevance to each other.
+   - Q, K, V: Linear projections of the input embeddings. Q represents what a token is "looking for", K represents what a token "offers", V contains the actual content to be aggregated.
+   - Attention scores: Computed as dot products between Q and K, scaled by sqrt
+
+[ Prompt: 116.3 t/s | Generation: 13.5 t/s ]
+
+> 
