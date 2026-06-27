@@ -26,7 +26,9 @@ type Props = {
   onOpenLaunchLogs:() => void;
 };
 
-const cfgKey = (c: LaunchConfig) => `${c.model}|${c.backend}`;
+// Identidade estável da config. Usa o `id` atribuído pelo backend; cai pra
+// chave composta só como fallback defensivo (config recém-criada ainda sem id).
+const cfgKey = (c: LaunchConfig) => c.id ?? `${c.model}|${c.backend}`;
 
 export function ConfigGrid({
   configs, models, estimates,

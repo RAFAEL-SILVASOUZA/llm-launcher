@@ -138,7 +138,14 @@
       "PowerShell(Start-Process -FilePath \"nvidia-smi\" -ArgumentList \"-i\",\"0\",\"-pl\",\"290\" -Verb RunAs -Wait; \"comando disparado\")",
       "PowerShell(Get-Item \"C:\\\\Users\\\\PC\\\\.lmstudio\\\\models\\\\unsloth\\\\Qwen3.6-27B-MTP-GGUF\\\\Qwen3.6-27B-UD-Q6_K_XL\\\\Qwen3.6-27B-UD-Q6_K_XL.gguf\" | Select-Object FullName,@{N='GB';E={[math]::Round\\($_.Length/1GB,2\\)}})",
       "PowerShell(1..6 | ForEach-Object { nvidia-smi --query-gpu=index,utilization.gpu,memory.used,power.draw,pstate,pcie.link.gen.current,pcie.link.width.current --format=csv,noheader; Write-Host \"--- sample $_ ---\"; Start-Sleep -Milliseconds 1500 })",
-      "PowerShell(1..8 | ForEach-Object { nvidia-smi --query-gpu=index,utilization.gpu,memory.used,power.draw,pstate --format=csv,noheader; Write-Host \"--- s$_ ---\"; Start-Sleep -Milliseconds 1500 })"
+      "PowerShell(1..8 | ForEach-Object { nvidia-smi --query-gpu=index,utilization.gpu,memory.used,power.draw,pstate --format=csv,noheader; Write-Host \"--- s$_ ---\"; Start-Sleep -Milliseconds 1500 })",
+      "Read(//c/Windows/System32/**)",
+      "WebFetch(domain:unsloth.ai)",
+      "WebFetch(domain:forums.developer.nvidia.com)",
+      "WebFetch(domain:medium.com)",
+      "Bash(cmake -S . -B build)",
+      "Bash(cmake --build build --config Release -j --target llama-server)",
+      "PowerShell(cd C:\\\\Users\\\\PC\\\\llm\\\\app; $env:PYTHONPATH = \"C:\\\\Users\\\\PC\\\\llm\\\\app\"; python \"C:\\\\Users\\\\PC\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-PC-llm\\\\6f477ef5-89dd-431f-ba99-367de33cdb7e\\\\scratchpad\\\\cfgtest.py\")"
     ]
   }
 }

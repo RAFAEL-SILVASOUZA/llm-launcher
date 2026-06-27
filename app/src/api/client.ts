@@ -90,10 +90,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(cfg),
     }),
-  deleteConfig: (model: string, backend?: string) =>
+  deleteConfig: (id: string) =>
     jsonFetch<{ ok: boolean; removed: number }>("/api/configs", {
       method: "DELETE",
-      body: JSON.stringify({ model, backend: backend ?? null }),
+      body: JSON.stringify({ id }),
     }),
 
   estimateMany: (items: {

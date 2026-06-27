@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Cpu, RotateCcw, Loader2, AlertTriangle, Thermometer, Activity, Zap, MemoryStick, LineChart, HardDrive } from "lucide-react";
+import { Cpu, RotateCcw, Loader2, AlertTriangle, Thermometer, Activity, Zap, MemoryStick, LineChart, HardDrive, Server }
+from "lucide-react";
 import { api } from "../api/client";
 import type { NvidiaStatus, SystemInfo } from "../api/types";
 
@@ -114,8 +115,9 @@ export function NvidiaPage() {
         {status && status.available && (
           <div className="space-y-4">
             {status.gpus.map((gpu, i) => (
-              <div key={i} className="grid gap-4 lg:grid-cols-2">
-                <GpuCard gpu={gpu} />
+              <div key={i}
+              className="grid gap-4 lg:grid-cols-2">                <GpuCard gpu={gpu}
+                hostTemp={status.host_temp_c} />
                 <GpuCharts history={history[i] ?? []} />
               </div>
             ))}
@@ -126,7 +128,8 @@ export function NvidiaPage() {
   );
 }
 
-function GpuCard({ gpu }: { gpu: Record<string, string> }) {
+function GpuCard({ gpu, hostTemp }: { gpu: Record<string, string>;
+hostTemp?: number | null }) {
   const name = gpu["name"] ?? "GPU";
   const driver = gpu["driver_version"] ?? "?";
   const memTotal = parseFloat(gpu["memory.total"] ?? "0");
@@ -135,6 +138,11 @@ function GpuCard({ gpu }: { gpu: Record<string, string> }) {
   const utilGpu  = gpu["utilization.gpu"] ?? "—";
   const utilMem  = gpu["utilization.memory"] ?? "—";
   const temp     = gpu["temperature.gpu"] ?? "—";
+  const tempMem  = gpu["temperature.memory"] ?? "—";
+  const tempHot  = gpu["temperature.hotspot"];  // NVAPI; ausente se indisp.
+  // tlimit = folga até o throttle; limit = temperatura de throttle (NVML).
+  const tempTlim = gpu["temperature.gpu.tlimit"] ?? "—";
+  const tempLimit = gpu["temperature.gpu.limit"];
   const fan      = gpu["fan.speed"] ?? "—";
   const power    = gpu["power.draw"] ?? "—";
   const powerLim = gpu["power.limit"] ?? "—";
@@ -143,6 +151,12 @@ function GpuCard({ gpu }: { gpu: Record<string, string> }) {
   const pstate   = gpu["pstate"] ?? "—";
 
   const memPct = memTotal > 0 ? (memUsed / memTotal) * 100 : 0;
+
+  // nvidia-smi devolve "N/A" (e "[N/A]" para tlimit) em sensores que a placa
+  // não expõe — junção de memória e thermal limit não existem em GeForce de
+  // consumidor, só em datacenter. Normaliza pra não grudar a unidade num N/A.
+  const withUnit = (v: string, unit: string) =>
+    /n\/a/i.test(v) ? "N/A" : `${v} ${unit}`;
 
   return (
     <div className="bg-ink-950 border border-ink-800 rounded p-4 space-y-3">
@@ -172,11 +186,31 @@ function GpuCard({ gpu }: { gpu: Record<string, string> }) {
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-xs">
-        <Stat icon={<Activity className="w-3 h-3 text-cyan-400" />} label="Uso GPU"    value={utilGpu} />
-        <Stat icon={<Activity className="w-3 h-3 text-cyan-400" />} label="Uso MEM"    value={utilMem} />
-        <Stat icon={<Thermometer className="w-3 h-3 text-red-400" />} label="Temp"     value={`${temp} °C`} />
-        <Stat icon={<Activity className="w-3 h-3 text-ink-400" />} label="Fan"          value={fan} />
-        <Stat icon={<Zap className="w-3 h-3 text-amber-400" />} label="Power"           value={`${power} / ${powerLim}`} />
+        <Stat icon={<Activity className="w-3 h-3 text-cyan-400" />}
+        label="Uso GPU"    value={utilGpu} />
+        <Stat icon={<Activity className="w-3 h-3 text-cyan-400" />}
+        label="Uso MEM"    value={utilMem} />
+        <Stat icon={<Thermometer className="w-3 h-3 text-red-400" />}
+        label="Temp GPU"  value={withUnit(temp, "°C")} />
+        <Stat icon={<Thermometer className="w-3 h-3 text-orange-400" />}
+        label="Temp MEM" value={withUnit(tempMem, "°C")} />
+        {tempHot != null && (
+          <Stat icon={<Thermometer className="w-3 h-3 text-rose-400" />}
+          label="Hot Spot" value={withUnit(tempHot, "°C")} />
+        )}
+        <Stat icon={<Thermometer className="w-3 h-3 text-yellow-400" />}
+        label="T-Limit"
+        value={tempLimit && /^\d+$/.test(tempLimit)
+          ? (/^-?\d+$/.test(tempTlim) ? `${tempLimit} °C · Δ${tempTlim}` : `${tempLimit} °C`)
+          : withUnit(tempTlim, "°C")} />
+        {hostTemp != null && (
+          <Stat icon={<Server className="w-3 h-3 text-blue-400" />}
+          label="Host"       value={`${hostTemp.toFixed(1)} °C`} />
+        )}
+        <Stat icon={<Activity className="w-3 h-3 text-ink-400" />}
+        label="Fan"          value={fan} />
+        <Stat icon={<Zap className="w-3 h-3 text-amber-400" />}
+        label="Power"           value={`${power} / ${powerLim}`} />
         <Stat icon={<Activity className="w-3 h-3 text-purple-400" />} label="Clock SM" value={clkSm} />
         <Stat icon={<Activity className="w-3 h-3 text-purple-400" />} label="Clock Mem" value={clkMem} />
       </div>

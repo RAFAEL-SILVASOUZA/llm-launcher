@@ -87,6 +87,7 @@ app.add_middleware(
 
 class LaunchConfig(BaseModel):
     """Subset persistido em last_config.json — espelha o schema de save_config."""
+    id: str | None = None   # identidade estável; backend gera no 1º save se ausente
     model: str
     backend: str = "turbo"
     context_window: int = 65_536
@@ -141,8 +142,7 @@ class SuggestRequest(BaseModel):
 
 
 class DeleteConfigRequest(BaseModel):
-    model: str
-    backend: str | None = None
+    id: str
 
 
 # ─── routes: opções e status ──────────────────────────────────────────────────
@@ -238,13 +238,13 @@ def list_configs():
 @app.post("/api/configs")
 def save_cfg(cfg: LaunchConfig):
     data = cfg.model_dump(exclude={"mode"})
-    config_store.save_config(data)
-    return {"ok": True, "config": data}
+    saved = config_store.save_config(data)   # atribui id se ausente (mutação)
+    return {"ok": True, "config": saved}
 
 
 @app.delete("/api/configs")
 def delete_cfg(req: DeleteConfigRequest):
-    removed = config_store.delete_config(req.model, req.backend)
+    removed = config_store.delete_config_by_id(req.id)
     return {"ok": True, "removed": removed}
 
 

@@ -40,10 +40,12 @@
     "productName": "LLM Launcher",
     "asar": false,
     "win": {
-      "target": "portable"
+      "target": "portable",
+      "icon": "public/logo.png"
     },
     "files": [
       "electron/**/*",
+      "public/**/*",
       "dist/**/*",
       "api/**/*",
       "requirements.txt",

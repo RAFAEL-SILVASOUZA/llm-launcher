@@ -22,6 +22,8 @@
     "git diff --cached --stat",
     "git diff .claude/settings.json",
     "git diff .claude/settings.local.json",
-    "git log --oneline -5"
+    "git log --oneline -5",
+    "nvidia-smi --query-gpu=temperature.gpu,temperature.memory,temperature.gpu_mem,temperature.host,temperature.video --format=csv,noheader 2>&1",
+    "powershell -Command \"Get-CimInstance -ClassName MSAcpi_ThermalZoneTemperature -Namespace root/wmi\" 2>&1"
   ]
 }

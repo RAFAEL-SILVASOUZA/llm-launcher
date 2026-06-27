@@ -82,6 +82,7 @@ export type GgufMeta = {
 };
 
 export type LaunchConfig = {
+  id?: string;   // identidade estável; o backend gera no 1º save se ausente
   model: string;
   backend: "turbo" | "vanilla" | "mtp";
   context_window: number;
@@ -200,8 +201,11 @@ export type HfDownloadEvent =
 // ─── NVIDIA detalhado ──────────────────────────────────────────────────────
 
 export type NvidiaStatus =
-  | { available: false; error: string }
-  | { available: true; gpus: Record<string, string>[] };
+  | { available: false;
+  error: string }
+  | { available: true;
+  gpus: Record<string, string>[];
+  host_temp_c?: number | null };
 
 // ─── LM Studio ──────────────────────────────────────────────────────────────
 

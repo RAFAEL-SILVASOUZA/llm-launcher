@@ -35,14 +35,6 @@ export default function App() {
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorInitial, setEditorInitial] = useState<Partial<LaunchConfig> | null>(null);
-  // "edit" = atualiza no lugar (se mudar a chave model|backend, apaga a antiga);
-  // "duplicate" = vai gerar uma nova entrada (mesmo se a chave mudar, a antiga fica);
-  // "new" = entrada nova do zero.
-  const [editorMode, setEditorMode] = useState<"edit" | "duplicate" | "new">("new");
-  // Snapshot da chave (model, backend) no momento que o editor abriu — usada
-  // pra detectar "rekey" no save quando estamos em modo edit.
-  const [editorOriginalKey, setEditorOriginalKey] =
-    useState<{ model: string; backend: string } | null>(null);
 
   const [launchId, setLaunchId] = useState<string | null>(null);
   const [launchCfg, setLaunchCfg] = useState<LaunchConfig | null>(null);
@@ -179,61 +171,48 @@ export default function App() {
   }, [downloadId, refresh]);
 
   const handleEdit = (cfg: LaunchConfig) => {
+    // Mantém o id no initial → o save atualiza esta mesma entrada.
     setEditorInitial(cfg);
-    setEditorMode("edit");
-    setEditorOriginalKey({ model: cfg.model, backend: cfg.backend });
     setEditorOpen(true);
   };
 
   const handleNew = () => {
     setEditorInitial(null);
-    setEditorMode("new");
-    setEditorOriginalKey(null);
     setEditorOpen(true);
   };
 
-  // Duplicar = abrir editor com initial = cfg, mas sem rastrear chave
-  // original — o save vai apenas adicionar/overwrite no slot da nova chave,
-  // deixando a entrada original intacta.
+  // Duplicar = abrir editor com uma cópia SEM id → o save gera um id novo e
+  // cria outra entrada, deixando a original intacta.
   const handleDuplicate = (cfg: LaunchConfig) => {
-    setEditorInitial({ ...cfg });
-    setEditorMode("duplicate");
-    setEditorOriginalKey(null);
+    const { id: _id, ...rest } = cfg;
+    setEditorInitial(rest);
     setEditorOpen(true);
   };
 
   const handleDeleteConfig = async (cfg: LaunchConfig) => {
+    if (!cfg.id) return;
     const ok = window.confirm(
       `Remover a config de "${cfg.model}" (${cfg.backend})?\nNão dá pra desfazer.`,
     );
     if (!ok) return;
-    await api.deleteConfig(cfg.model, cfg.backend);
+    await api.deleteConfig(cfg.id);
     await refresh();
   };
 
-  // Em modo "edit", se o usuário trocou backend (ou modelo) e salvou, a chave
-  // composta muda e o backend ia criar uma entrada nova deixando a antiga
-  // órfã. Aqui deletamos a antiga antes de gravar — comporta como "rename".
-  const rekeyIfNeeded = async (cfg: LaunchConfig) => {
-    if (editorMode !== "edit" || !editorOriginalKey) return;
-    if (editorOriginalKey.model === cfg.model &&
-        editorOriginalKey.backend === cfg.backend) return;
-    try {
-      await api.deleteConfig(editorOriginalKey.model, editorOriginalKey.backend);
-    } catch { /* se já não existe, ok */ }
-  };
-
+  // Identidade é o `id`: editar (mesmo trocando model/backend) atualiza a mesma
+  // entrada, e salvar sem id cria uma nova — sem nunca sobrescrever outra config.
   const handleSave = async (cfg: LaunchConfig) => {
-    await rekeyIfNeeded(cfg);
     await api.saveConfig(cfg);
     await refresh();
   };
 
   const handleLaunch = async (cfg: LaunchConfig) => {
-    await rekeyIfNeeded(cfg);
-    await api.saveConfig(cfg);
-    const r = await api.launch(cfg);
-    setLaunchCfg(cfg);
+    // Salva primeiro pra obter o id atribuído pelo backend, e lança ESSA config
+    // (com id) — assim o launch não cria uma 2ª entrada e o auto-degrade
+    // atualiza a config certa.
+    const { config } = await api.saveConfig(cfg);
+    const r = await api.launch(config);
+    setLaunchCfg(config);
     setLaunchId(r.launch_id);
     setLaunchModalOpen(true);
     setEditorOpen(false);

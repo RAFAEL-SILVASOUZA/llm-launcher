@@ -161,6 +161,9 @@ function createWindow() {
     },
   });
 
+  // Ícone da janela (PNG convertido internamente para ICO no Windows)
+  win.setIcon(path.join(__dirname, "..", "public", "logo.png"));
+
   if (DEV_URL) {
     win.loadURL(DEV_URL);
     if (process.env.DEVTOOLS === "1") {
