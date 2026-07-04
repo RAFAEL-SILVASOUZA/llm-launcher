@@ -5,3 +5,6 @@ dist/
 *.tmp
 .env
 .env.local
+.claude/
+app/api/router_preset.ini
+app/api/api_running.json
