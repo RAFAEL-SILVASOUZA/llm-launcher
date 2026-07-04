@@ -66,7 +66,7 @@ Antes de começar, instale (tudo gratuito):
 Abra o **PowerShell** e rode:
 
 ```powershell
-git clone <URL-DESTE-REPO> C:\Users\SEU_USUARIO\llm
+git clone https://github.com/RAFAEL-SILVASOUZA/llm-launcher.git C:\Users\SEU_USUARIO\llm
 cd C:\Users\SEU_USUARIO\llm
 ```
 
