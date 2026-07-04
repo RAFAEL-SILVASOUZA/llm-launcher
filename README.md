@@ -169,7 +169,16 @@ cd app
 npm run build
 ```
 
-Sai um executável **portable** para Windows (via electron-builder) na pasta `app/dist`. O Python continua sendo necessário na máquina — o backend roda como processo filho. Se a APP abrir com erro de conexão, o caminho do log do backend (`python.log`) aparece na própria tela para diagnóstico.
+Sai um executável **portable** para Windows (via electron-builder) na pasta `app/release`. O Python continua sendo necessário na máquina — o backend roda como processo filho. Se a APP abrir com erro de conexão, o caminho do log do backend (`python.log`) aparece na própria tela para diagnóstico.
+
+**Releases no GitHub:** o repositório tem um workflow de CI (`.github/workflows/release.yml`) que faz tudo isso sozinho. Basta criar e enviar uma tag de versão:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+O GitHub Actions builda a APP num runner Windows, compacta o portable em `LLM-Launcher-v0.2.0-win-portable.zip` e publica uma **Release** com o zip anexado e as notas geradas a partir dos commits. A versão do `package.json` é sincronizada com a tag automaticamente durante o build.
 
 ### 3.3 Arquitetura
 

@@ -8,3 +8,4 @@ dist/
 .claude/
 app/api/router_preset.ini
 app/api/api_running.json
+app/release/

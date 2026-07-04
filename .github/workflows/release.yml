@@ -1,0 +1,54 @@
+# Release automática: ao dar push numa tag v* (ex.: v0.2.0), builda a APP
+# num runner Windows e publica uma Release no GitHub com o zip do portable.
+#
+#   git tag v0.2.0
+#   git push origin v0.2.0
+#
+# A versão do package.json é sobrescrita pela da tag durante o build, então
+# não precisa manter as duas em sincronia manualmente.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # criar a release e anexar o asset
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Sincroniza versão com a tag (v0.2.0 -> 0.2.0)
+        shell: bash
+        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+
+      - name: Instala dependências
+        run: npm ci
+
+      - name: Build (typecheck + vite + electron-builder portable)
+        run: npm run build
+
+      - name: Compacta o portable
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem release -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw "Nenhum .exe encontrado em app/release" }
+          Compress-Archive -Path $exe.FullName -DestinationPath "LLM-Launcher-$env:GITHUB_REF_NAME-win-portable.zip"
+
+      - name: Publica a release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/LLM-Launcher-*.zip
+          generate_release_notes: true

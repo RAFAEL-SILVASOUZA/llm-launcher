@@ -39,6 +39,9 @@
     "appId": "com.llm.launcher",
     "productName": "LLM Launcher",
     "asar": false,
+    "directories": {
+      "output": "release"
+    },
     "win": {
       "target": "portable",
       "icon": "public/logo.png"
