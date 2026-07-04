@@ -207,6 +207,158 @@ def build_cli_command(
     return cmd
 
 
+# ─── router mode (multi-modelo) ────────────────────────────────────────────
+# llama-server sem -m + --models-preset arquivo.ini sobe o "router": cada
+# seção do INI vira um modelo servível, carregado num processo filho isolado.
+# O client escolhe o modelo pelo campo "model" do request (POST) ou pelo
+# query param ?model= (GET) e o router encaminha pro filho certo.
+
+def _router_section_lines(cfg: dict) -> list[str]:
+    """Chaves INI de uma seção do preset — espelho 1:1 das flags que
+    build_server_command emite (nomes long-form sem os `--`).
+
+    host/port/alias ficam de fora: o README do server avisa que o router
+    controla e sobrescreve esses argumentos ao subir cada instância.
+    """
+    lines: list[str] = []
+
+    def add(key: str, val) -> None:
+        lines.append(f"{key} = {val}")
+
+    model_path = Path(cfg["model"])
+    add("model", str(model_path))
+    mmproj = cfg.get("mmproj")
+    if mmproj:
+        add("mmproj", str(Path(mmproj)))
+
+    parallel = cfg.get("parallel_slots", 1)
+    add("ctx-size", cfg["context_window"] * parallel)
+    add("n-gpu-layers", cfg.get("gpu_layers", 99))
+
+    split_mode = cfg.get("split_mode")
+    if split_mode in ("none", "layer", "row"):
+        add("split-mode", split_mode)
+    tensor_split = (cfg.get("tensor_split") or "").strip().replace(" ", "")
+    if tensor_split:
+        add("tensor-split", tensor_split)
+    main_gpu = cfg.get("main_gpu")
+    if main_gpu is not None and main_gpu >= 0:
+        add("main-gpu", main_gpu)
+
+    n_cpu_moe = cfg.get("n_cpu_moe", 0)
+    if n_cpu_moe and n_cpu_moe > 0:
+        add("n-cpu-moe", n_cpu_moe)
+
+    kv = cfg["kv_cache"]
+    add("cache-type-k", kv)
+    add("cache-type-v", kv)
+    add("flash-attn", "on" if cfg.get("flash_attn", True) else "off")
+    add("batch-size", cfg.get("batch_size", 2_048))
+    add("ubatch-size", cfg.get("ubatch_size", 512))
+    add("threads", cfg.get("threads_gen", CPU_THREADS_GEN))
+    add("threads-batch", cfg.get("threads_batch", CPU_THREADS_BATCH))
+    add("parallel", parallel)
+    add("n-predict", cfg.get("max_tokens", 8_192))
+
+    # Rede de segurança anti-loop — mesma justificativa do build_server_command.
+    add("temp", 0.3)
+    add("top-p", 0.8)
+    add("top-k", 20)
+    add("repeat-penalty", 1.05)
+    add("no-context-shift", "true")
+
+    reasoning_budget = cfg.get("reasoning_budget")
+    if reasoning_budget is not None:
+        if reasoning_budget == 0:
+            add("reasoning", "off")
+        else:
+            add("reasoning", "on")
+            add("reasoning-budget", reasoning_budget)
+
+    if cfg.get("preserve_thinking", False):
+        # Valor INI é a linha crua — sem escaping de shell.
+        add("chat-template-kwargs", '{"preserve_thinking": true}')
+
+    if cfg.get("mlock", True):
+        add("mlock", "true")
+
+    backend = cfg.get("backend", "turbo")
+    if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
+        add("spec-type", "draft-mtp")
+        add("spec-draft-n-max", cfg.get("spec_draft_n_max", 2))
+
+    add("cache-ram", cfg.get("cache_ram", 8_192))
+    add("ctx-checkpoints", cfg.get("ctx_checkpoints", 8))
+    add("jinja", "true")
+    add("metrics", "true")
+    if cfg.get("verbose", False):
+        add("verbose", "true")
+
+    # Exclusivo de preset: sobe o modelo junto com o router, sem esperar o
+    # primeiro request — é o "rodar todos de uma vez" da UI.
+    add("load-on-startup", "true")
+    return lines
+
+
+def build_router_preset(cfgs: list[dict]) -> tuple[str, list[str]]:
+    """Gera o texto do INI e a lista de model ids (nomes das seções).
+
+    O nome da seção é o id que o client usa no campo "model" do request.
+    Aliases duplicados (mesmo modelo em duas configs) ganham sufixo -2, -3…
+    """
+    used: set[str] = set()
+    names: list[str] = []
+    blocks: list[str] = []
+    for cfg in cfgs:
+        base = make_alias(Path(cfg["model"]))
+        name = base
+        n = 2
+        while name in used:
+            name = f"{base}-{n}"
+            n += 1
+        used.add(name)
+        names.append(name)
+        blocks.append(f"[{name}]\n" + "\n".join(_router_section_lines(cfg)))
+    text = "version = 1\n\n" + "\n\n".join(blocks) + "\n"
+    return text, names
+
+
+def router_binary_for(cfgs: list[dict]) -> Path:
+    """Binário único do router. O router spawna os filhos com o PRÓPRIO exe,
+    então todas as configs selecionadas precisam resolver pro mesmo
+    llama-server (turbo x vanilla não podem misturar; vanilla+mtp podem,
+    porque mtp é alias do binário vanilla)."""
+    bins = {backend_binary(cfg.get("backend", "turbo"), "server") for cfg in cfgs}
+    if len(bins) > 1:
+        raise ValueError(
+            "Configs selecionadas usam binários diferentes ("
+            + ", ".join(str(b) for b in sorted(bins))
+            + ") — o modo router roda todas no mesmo llama-server. "
+            "Selecione configs de um único backend (vanilla e mtp podem misturar)."
+        )
+    server_bin = bins.pop()
+    if not server_bin.exists():
+        raise BackendBinaryMissing(f"llama-server não encontrado em: {server_bin}")
+    return server_bin
+
+
+def build_router_command(
+    cfgs: list[dict],
+    preset_path: Path,
+    host: str = "0.0.0.0",
+    port: int = 1234,
+) -> str:
+    """Comando do router: sem -m (é isso que ativa o modo router). Flags de
+    modelo ficam TODAS no preset — argumento de linha de comando do router tem
+    precedência sobre o INI e vazaria pra todas as instâncias filhas."""
+    server_bin = router_binary_for(cfgs)
+    cmd = f'"{server_bin}"'
+    cmd += f' --models-preset "{preset_path}"'
+    cmd += f' --models-max {len(cfgs)}'
+    cmd += f' --host {host} --port {port}'
+    return cmd
+
+
 def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
     """Reconstrói o comando a partir de uma config salva."""
     mmproj_str = cfg.get("mmproj")

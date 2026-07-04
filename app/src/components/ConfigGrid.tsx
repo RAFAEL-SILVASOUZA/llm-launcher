@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Square, Pencil, Rocket, Trash2, ScrollText, Plus, Loader2,
   Copy, ChevronRight, ChevronDown, Brain, Image as ImageIcon, ClipboardCopy, Check, RotateCw,
+  Network,
 } from "lucide-react";
 import { api } from "../api/client";
-import type { Estimate, LaunchConfig, ModelInfo } from "../api/types";
+import type { ActiveLaunchConfig, Estimate, LaunchConfig, ModelInfo } from "../api/types";
+import { isRouterConfig } from "../api/types";
 import { estimateStatus, fmtCtx, fmtMiB, modelAliasFromPath, shortPath, statusBg, statusText } from "../util/format";
 
 type SortKey =
@@ -19,8 +21,10 @@ type Props = {
   onDuplicate:   (cfg: LaunchConfig) => void;
   onDelete:      (cfg: LaunchConfig) => void;
   onLaunch:      (cfg: LaunchConfig) => void;
+  onLaunchRouter:(ids: string[]) => void;
   onNew:         () => void;
-  activeLaunchCfg: LaunchConfig | null;
+  activeLaunchCfg: ActiveLaunchConfig | null;
+  launchActive: boolean;
   onStopLaunch:    () => void;
   onRestartLaunch: () => void;
   onOpenLaunchLogs:() => void;
@@ -30,16 +34,78 @@ type Props = {
 // chave composta só como fallback defensivo (config recém-criada ainda sem id).
 const cfgKey = (c: LaunchConfig) => c.id ?? `${c.model}|${c.backend}`;
 
+// O modo router roda todas as configs no MESMO llama-server.exe; mtp reusa o
+// binário do vanilla, então só turbo é grupo separado.
+const binGroup = (backend: string) => (backend === "turbo" ? "turbo" : "vanilla");
+
 export function ConfigGrid({
   configs, models, estimates,
-  onEdit, onDuplicate, onDelete, onLaunch, onNew,
-  activeLaunchCfg, onStopLaunch, onRestartLaunch, onOpenLaunchLogs,
+  onEdit, onDuplicate, onDelete, onLaunch, onLaunchRouter, onNew,
+  activeLaunchCfg, launchActive, onStopLaunch, onRestartLaunch, onOpenLaunchLogs,
 }: Props) {
   const [query, setQuery] = useState("");
   const [backendFilter, setBackendFilter] = useState<string>("");
   const [sortKey, setSortKey] = useState<SortKey>("alias");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [expanded, setExpanded] = useState<string | null>(null);
+
+  // Seleção pro launch múltiplo (checkboxes) — guarda ids de config.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // Launch subiu (ou app reabriu com launch ativo): seleção não faz mais
+  // sentido até ele parar.
+  useEffect(() => {
+    if (launchActive) setSelected(new Set());
+  }, [launchActive]);
+
+  // Linhas "running": no launch single é a config ativa; no router são todas
+  // as configs selecionadas quando o hub subiu.
+  const activeKeys = useMemo(() => {
+    if (!activeLaunchCfg) return new Set<string>();
+    if (isRouterConfig(activeLaunchCfg)) return new Set(activeLaunchCfg.config_ids);
+    return new Set([cfgKey(activeLaunchCfg)]);
+  }, [activeLaunchCfg]);
+
+  // Launch router ativo: os controles (stop/restart/logs) valem pro grupo
+  // inteiro — um único llama-server — então saem das linhas e vão pra barra
+  // unificada acima da tabela.
+  const routerCfg =
+    launchActive && activeLaunchCfg && isRouterConfig(activeLaunchCfg)
+      ? activeLaunchCfg
+      : null;
+
+  // Grupo de binário da seleção atual — configs de grupo diferente ficam com
+  // o checkbox desabilitado (router = um exe só).
+  const selectedGroup = useMemo(() => {
+    for (const c of configs) {
+      if (c.id && selected.has(c.id)) return binGroup(c.backend ?? "turbo");
+    }
+    return null;
+  }, [configs, selected]);
+
+  const toggleSelect = (c: LaunchConfig) => {
+    if (!c.id) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(c.id!)) next.delete(c.id!);
+      else next.add(c.id!);
+      return next;
+    });
+  };
+
+  // Soma das estimativas de VRAM da seleção — hint de "cabe tudo junto?".
+  const selectionVram = useMemo(() => {
+    let total = 0;
+    let avail: number | null = null;
+    let missing = false;
+    for (const id of selected) {
+      const est = estimates[id];
+      if (!est) { missing = true; continue; }
+      total += est.vram_total;
+      if (est.vram_avail !== null) avail = est.vram_avail;
+    }
+    return { total, avail, missing };
+  }, [selected, estimates]);
 
   const modelByPath = useMemo(
     () => new Map(models.map((m) => [m.path, m])),
@@ -129,10 +195,84 @@ export function ConfigGrid({
         </button>
       </div>
 
+      {routerCfg && (
+        <div className="px-4 py-2 border-b border-ink-800 bg-amber-950/20 flex items-center gap-3 flex-wrap">
+          <span className="text-xs text-amber-300 flex items-center gap-1.5">
+            <Network className="w-3.5 h-3.5" />
+            <Loader2 className="w-3 h-3 animate-spin" />
+            router ativo — <span className="font-medium">{routerCfg.config_ids.length}</span> modelos no mesmo server
+          </span>
+          <div className="flex-1" />
+          <button
+            onClick={onOpenLaunchLogs}
+            className="text-xs px-2.5 py-1.5 rounded bg-ink-800 hover:bg-ink-700 text-ink-300 flex items-center gap-1.5"
+            title="Ver logs do launch (server único, log único)"
+          >
+            <ScrollText className="w-3.5 h-3.5" />logs
+          </button>
+          <button
+            onClick={onRestartLaunch}
+            className="text-xs px-2.5 py-1.5 rounded bg-amber-900/50 hover:bg-amber-800 text-amber-100 flex items-center gap-1.5"
+            title="Reiniciar o server router (mesmas configs, mesma porta)"
+          >
+            <RotateCw className="w-3.5 h-3.5" />reiniciar
+          </button>
+          <button
+            onClick={onStopLaunch}
+            className="text-xs px-2.5 py-1.5 rounded bg-red-900/60 hover:bg-red-800 text-red-100 flex items-center gap-1.5 font-medium"
+            title="Parar o router — derruba todos os modelos de uma vez"
+          >
+            <Square className="w-3.5 h-3.5" />parar router
+          </button>
+        </div>
+      )}
+
+      {selected.size > 0 && !launchActive && (
+        <div className="px-4 py-2 border-b border-ink-800 bg-ink-950/60 flex items-center gap-3 flex-wrap">
+          <span className="text-xs text-ink-300">
+            <span className="text-ink-100 font-medium">{selected.size}</span> selecionada{selected.size > 1 ? "s" : ""} pro modo router
+          </span>
+          {selected.size >= 2 && selectionVram.total > 0 && (
+            <span
+              className={`text-xs mono tabular-nums ${
+                selectionVram.avail !== null && selectionVram.total > selectionVram.avail
+                  ? "text-red-400" : "text-ink-400"
+              }`}
+              title="Soma das estimativas de VRAM das configs selecionadas (todas carregam juntas no launch)"
+            >
+              Σ VRAM ~{fmtMiB(selectionVram.total)}
+              {selectionVram.avail !== null && <> / {fmtMiB(selectionVram.avail)} livre</>}
+              {selectionVram.missing && " (parcial)"}
+            </span>
+          )}
+          <div className="flex-1" />
+          <button
+            onClick={() => setSelected(new Set())}
+            className="text-xs px-2 py-1 rounded bg-ink-800 hover:bg-ink-700 text-ink-300"
+          >
+            limpar
+          </button>
+          <button
+            disabled={selected.size < 2}
+            onClick={() => onLaunchRouter(configs.filter((c) => c.id && selected.has(c.id)).map((c) => c.id!))}
+            className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded text-sm font-medium flex items-center gap-1.5"
+            title={
+              selected.size < 2
+                ? "Selecione pelo menos 2 configs — pra rodar uma só, use o foguete da linha"
+                : "Sobe um llama-server em modo router com todos os modelos selecionados; o client escolhe pelo campo \"model\""
+            }
+          >
+            <Network className="w-3.5 h-3.5" />
+            rodar {selected.size} juntas (router)
+          </button>
+        </div>
+      )}
+
       <div className="overflow-auto max-h-[calc(100vh-280px)]">
         <table className="w-full text-sm">
           <thead className="bg-ink-950 sticky top-0 text-xs uppercase text-ink-400 z-[1]">
             <tr>
+              <Th title="selecionar configs pra rodar juntas (modo router)">☑</Th>
               <Th />
               <Th title="estimativa de VRAM da config: cabe / aperta / estoura">●</Th>
               <Th onClick={() => setSort("alias")}          icon={sortIcon("alias")}>Modelo</Th>
@@ -150,7 +290,7 @@ export function ConfigGrid({
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-4 py-8 text-center text-ink-500">
+                <td colSpan={13} className="px-4 py-8 text-center text-ink-500">
                   {configs.length === 0
                     ? "Nenhuma config salva ainda. Clique em + nova pra começar."
                     : "Nenhuma config bate com o filtro."}
@@ -159,8 +299,7 @@ export function ConfigGrid({
             )}
             {rows.map((c, i) => {
               const key = cfgKey(c);
-              const activeKey = activeLaunchCfg ? cfgKey(activeLaunchCfg) : null;
-              const isActive = key === activeKey;
+              const isActive = activeKeys.has(key);
               const m = modelByPath.get(c.model);
               const alias = m?.alias ?? modelAliasFromPath(c.model);
               const backend = c.backend ?? "turbo";
@@ -168,6 +307,9 @@ export function ConfigGrid({
               const est = estimates[key] ?? null;
               const status = est ? estimateStatus(est.vram_total, est.vram_avail) : "unknown";
               const isExpanded = expanded === key;
+              const isSelected = !!c.id && selected.has(c.id);
+              const groupBlocked =
+                selectedGroup !== null && !isSelected && binGroup(backend) !== selectedGroup;
 
               return (
                 <FragmentRow
@@ -180,6 +322,17 @@ export function ConfigGrid({
                   status={status}
                   est={est}
                   isActive={isActive}
+                  launchActive={launchActive}
+                  routerActive={routerCfg !== null}
+                  isSelected={isSelected}
+                  selectDisabled={launchActive || !c.id || groupBlocked}
+                  selectDisabledReason={
+                    launchActive ? "pare o launch ativo antes de montar uma seleção"
+                    : !c.id ? "config sem id — salve-a de novo"
+                    : groupBlocked ? "backend incompatível com a seleção (router usa um único binário; turbo não mistura com vanilla/mtp)"
+                    : undefined
+                  }
+                  onToggleSelect={() => toggleSelect(c)}
                   isExpanded={isExpanded}
                   onToggleExpand={() => setExpanded(isExpanded ? null : key)}
                   onEdit={onEdit}
@@ -210,6 +363,12 @@ type RowProps = {
   status: "ok" | "tight" | "overflow" | "unknown";
   est: Estimate | null;
   isActive: boolean;
+  launchActive: boolean;
+  routerActive: boolean;
+  isSelected: boolean;
+  selectDisabled: boolean;
+  selectDisabledReason?: string;
+  onToggleSelect: () => void;
   isExpanded: boolean;
   onToggleExpand: () => void;
   onEdit:      (cfg: LaunchConfig) => void;
@@ -231,8 +390,18 @@ function FragmentRow(p: RowProps) {
       <tr
         className={`border-t border-ink-800 hover:bg-ink-800/50 group ${
           p.isActive ? "bg-amber-950/30 border-amber-700/40" : ""
-        } ${p.isExpanded ? "bg-ink-800/30" : ""}`}
+        } ${p.isSelected ? "bg-emerald-950/20" : ""} ${p.isExpanded ? "bg-ink-800/30" : ""}`}
       >
+        <td className="px-2 py-2 align-top w-6">
+          <input
+            type="checkbox"
+            checked={p.isSelected}
+            disabled={p.selectDisabled}
+            onChange={p.onToggleSelect}
+            title={p.selectDisabledReason ?? "selecionar pro launch múltiplo (modo router)"}
+            className="w-3.5 h-3.5 accent-emerald-600 disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
+          />
+        </td>
         <td className="px-2 py-2 align-top w-6">
           <button
             onClick={p.onToggleExpand}
@@ -288,6 +457,8 @@ function FragmentRow(p: RowProps) {
           <ActionButtons
             cfg={c}
             isActive={p.isActive}
+            launchActive={p.launchActive}
+            routerActive={p.routerActive}
             onEdit={p.onEdit}
             onDuplicate={p.onDuplicate}
             onDelete={p.onDelete}
@@ -300,7 +471,7 @@ function FragmentRow(p: RowProps) {
       </tr>
       {p.isExpanded && (
         <tr className="bg-ink-950/60 border-t border-ink-800">
-          <td colSpan={12} className="px-6 py-4">
+          <td colSpan={13} className="px-6 py-4">
             <ExpandedPanel cfg={c} est={p.est} />
           </td>
         </tr>
@@ -310,10 +481,10 @@ function FragmentRow(p: RowProps) {
 }
 
 function ActionButtons({
-  cfg, isActive,
+  cfg, isActive, launchActive, routerActive,
   onEdit, onDuplicate, onDelete, onLaunch, onStopLaunch, onRestartLaunch, onOpenLaunchLogs,
 }: {
-  cfg: LaunchConfig; isActive: boolean;
+  cfg: LaunchConfig; isActive: boolean; launchActive: boolean; routerActive: boolean;
   onEdit:      (cfg: LaunchConfig) => void;
   onDuplicate: (cfg: LaunchConfig) => void;
   onDelete:    (cfg: LaunchConfig) => void;
@@ -337,7 +508,9 @@ function ActionButtons({
         title="Duplicar config (copia tudo, escolha outro backend)"
       ><Copy className="w-3.5 h-3.5" /></button>
 
-      {isActive ? (
+      {/* No router os controles são do grupo inteiro (barra unificada acima
+          da tabela) — a linha não ganha stop/restart/logs individuais. */}
+      {isActive && !routerActive ? (
         <>
           <button
             onClick={onStopLaunch}
@@ -358,8 +531,11 @@ function ActionButtons({
       ) : (
         <button
           onClick={() => onLaunch(cfg)}
-          className={`${btnBase} bg-accent hover:bg-accent/80 text-white`}
-          title="Subir o llama-server com esta config"
+          disabled={launchActive}
+          className={`${btnBase} bg-accent hover:bg-accent/80 text-white disabled:opacity-30 disabled:cursor-not-allowed`}
+          title={launchActive
+            ? "Já existe um launch ativo — pare-o antes de subir outro modelo"
+            : "Subir o llama-server com esta config"}
         ><Rocket className="w-3.5 h-3.5" /></button>
       )}
 

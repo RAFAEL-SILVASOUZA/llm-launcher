@@ -23,6 +23,9 @@ Endpoints (prefixo /api):
   POST   /suggest/n-gpu-layers — sugestão de -ngl
 
   POST   /launch             — inicia o launch resiliente; devolve {launch_id}
+                               (409 se já houver launch ativo — um por vez)
+  POST   /launch-router      — sobe N configs de uma vez (modo router do
+                               llama-server, preset INI); body {ids: [...]}
   GET    /launch/{id}/events — SSE de eventos
   POST   /launch/{id}/cancel — cancela o launch
 """
@@ -318,9 +321,13 @@ def suggest_ngl(req: SuggestRequest):
 # ─── launches: fila de eventos por id, runner em thread, SSE drain ────────────
 
 class LaunchSession:
-    def __init__(self, cfg: dict, *, attached_pid: int | None = None, launch_id: str | None = None):
+    def __init__(self, cfg: dict, *, attached_pid: int | None = None, launch_id: str | None = None,
+                 member_cfgs: list[dict] | None = None):
         self.id = launch_id or uuid.uuid4().hex[:12]
         self.cfg = cfg
+        # Modo router: cfg é sintética ({"router": True, ...}) e member_cfgs
+        # tem as configs reais que viram seções do preset INI.
+        self.member_cfgs = member_cfgs
         self.handle = runner.LaunchHandle(attached_pid=attached_pid)
         self.queue: Queue[dict] = Queue()
         self.done = False
@@ -348,10 +355,16 @@ class LaunchSession:
 
         def _runner_target():
             try:
-                runner.run_server_resiliently(
-                    self.cfg, self.on_event, self.handle,
-                    on_proc_pid=self._register_pid,
-                )
+                if self.cfg.get("router") and self.member_cfgs:
+                    runner.run_router_server(
+                        self.member_cfgs, self.cfg, self.on_event, self.handle,
+                        on_proc_pid=self._register_pid,
+                    )
+                else:
+                    runner.run_server_resiliently(
+                        self.cfg, self.on_event, self.handle,
+                        on_proc_pid=self._register_pid,
+                    )
             except Exception as e:
                 self.on_event({"type": "giveup", "reason": f"runner crash: {e}"})
             finally:
@@ -367,8 +380,25 @@ _SESSIONS: dict[str, LaunchSession] = {}
 _SESSIONS_LOCK = threading.Lock()
 
 
+def _active_launch_id() -> str | None:
+    """id do launch vivo (single ou router), se houver. Um por vez: a porta
+    1234 é única e dois llama-server disputando GPU só geram OOM confuso."""
+    with _SESSIONS_LOCK:
+        for s in _SESSIONS.values():
+            if not s.done:
+                return s.id
+    return None
+
+
 @app.post("/api/launch")
 def launch(cfg: LaunchConfig):
+    active = _active_launch_id()
+    if active is not None:
+        raise HTTPException(
+            409,
+            "Já existe um launch ativo — pare o servidor atual antes de subir "
+            "outro modelo (ou use a seleção múltipla pra rodar vários juntos).",
+        )
     data = cfg.model_dump(exclude={"mode"})
     config_store.save_config(data)
     session = LaunchSession(data)
@@ -376,6 +406,61 @@ def launch(cfg: LaunchConfig):
         _SESSIONS[session.id] = session
     session.start()
     return {"launch_id": session.id}
+
+
+class RouterLaunchRequest(BaseModel):
+    ids: list[str]
+
+
+@app.post("/api/launch-router")
+def launch_router(req: RouterLaunchRequest):
+    """Sobe VÁRIOS modelos de uma vez no modo router do llama-server: um
+    preset INI com uma seção por config selecionada, todas com
+    load-on-startup. O client aponta pra porta 1234 e escolhe o modelo pelo
+    campo "model" do request."""
+    active = _active_launch_id()
+    if active is not None:
+        raise HTTPException(
+            409, "Já existe um launch ativo — pare-o antes de subir o modo router.")
+    if len(req.ids) < 2:
+        raise HTTPException(400, "Selecione pelo menos 2 configs pro modo router.")
+
+    by_id = {c.get("id"): c for c in config_store.read_all_configs()}
+    missing = [i for i in req.ids if i not in by_id]
+    if missing:
+        raise HTTPException(404, f"Configs não encontradas: {', '.join(missing)}")
+    cfgs = [by_id[i] for i in req.ids]
+
+    try:
+        builder_mod.router_binary_for(cfgs)  # binário único + existente
+    except builder_mod.BackendBinaryMissing as e:
+        raise HTTPException(400, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    # O binário precisa ser recente o bastante pra ter o modo router.
+    probe_backend = cfgs[0].get("backend", "turbo")
+    help_text = backends_mod.backend_help_text(probe_backend, "server")
+    if help_text and "--models-preset" not in help_text:
+        raise HTTPException(
+            400,
+            f"O llama-server do backend '{probe_backend}' não suporta o modo "
+            "router (--models-preset). Atualize/recompile o binário.",
+        )
+
+    _, model_ids = builder_mod.build_router_preset(cfgs)
+    router_cfg = {
+        "router":     True,
+        "backend":    probe_backend,
+        "config_ids": req.ids,
+        "model_ids":  model_ids,
+        "models":     [c.get("model", "") for c in cfgs],
+    }
+    session = LaunchSession(router_cfg, member_cfgs=cfgs)
+    with _SESSIONS_LOCK:
+        _SESSIONS[session.id] = session
+    session.start()
+    return {"launch_id": session.id, "config": router_cfg}
 
 
 @app.get("/api/launch/{launch_id}/events")
@@ -390,7 +475,11 @@ async def launch_events(launch_id: str, request: Request):
             if await request.is_disconnected():
                 return
             try:
-                ev = session.queue.get(timeout=0.5)
+                # Queue.get bloqueante NUNCA pode rodar direto no event loop:
+                # trava o uvicorn inteiro (todas as rotas) enquanto espera o
+                # próximo evento — a UI congela junto. to_thread manda a
+                # espera pro thread pool e o loop segue servindo requests.
+                ev = await asyncio.to_thread(session.queue.get, True, 0.5)
             except Empty:
                 # keepalive comment line (SSE)
                 yield ": keepalive\n\n"
@@ -604,7 +693,9 @@ async def hf_download_events(download_id: str, request: Request):
             if await request.is_disconnected():
                 return
             try:
-                ev = session.queue.get(timeout=0.5)
+                # to_thread: ver comentário no SSE de launch — get bloqueante
+                # no event loop congelava a API inteira durante o download.
+                ev = await asyncio.to_thread(session.queue.get, True, 0.5)
             except Empty:
                 yield ": keepalive\n\n"
                 continue
@@ -751,7 +842,8 @@ async def mcp_events(server_id: str, request: Request):
                 if await request.is_disconnected():
                     return
                 try:
-                    ev = q.get(timeout=0.5)
+                    # to_thread: mesmo motivo dos outros SSE — não bloquear o loop.
+                    ev = await asyncio.to_thread(q.get, True, 0.5)
                 except Empty:
                     yield ": keepalive\n\n"
                     continue

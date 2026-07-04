@@ -2,13 +2,14 @@ import React from "react";
 import { Square, XCircle, CheckCircle, AlertTriangle, ArrowDownUp, RotateCw, Play } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api, eventsStream } from "../api/client";
-import type { LaunchConfig, LaunchEvent } from "../api/types";
+import type { ActiveLaunchConfig, LaunchEvent } from "../api/types";
+import { isRouterConfig } from "../api/types";
 import { Modal } from "./Modal";
 
 type Props = {
   open: boolean;
   launchId: string | null;
-  config: LaunchConfig | null;
+  config: ActiveLaunchConfig | null;
   onClose: () => void;
 };
 
@@ -19,7 +20,7 @@ type Props = {
 export function LaunchModal({ open, launchId, config, onClose }: Props) {
   const [lines, setLines] = useState<{ kind: string; text: string; icon?: React.ReactNode }[]>([]);
   const [done, setDone] = useState(false);
-  const [currentCfg, setCurrentCfg] = useState<LaunchConfig | null>(config);
+  const [currentCfg, setCurrentCfg] = useState<ActiveLaunchConfig | null>(config);
   const [lmsHint, setLmsHint] = useState(false);
   const [lmsLoading, setLmsLoading] = useState(false);
   const [lmsResult, setLmsResult] = useState<string | null>(null);
@@ -134,7 +135,7 @@ export function LaunchModal({ open, launchId, config, onClose }: Props) {
   };
 
   const handleLmsFallback = async () => {
-    if (!currentCfg) return;
+    if (!currentCfg || isRouterConfig(currentCfg)) return;
     setLmsLoading(true);
     setLines((prev) => [...prev, { kind: "info", text: `tentando carregar via LM Studio…`, icon: <Play className="w-3 h-3" /> }]);
     try {
@@ -213,7 +214,15 @@ export function LaunchModal({ open, launchId, config, onClose }: Props) {
       }
     >
       <div className="p-4 space-y-3">
-        {currentCfg && (
+        {currentCfg && (isRouterConfig(currentCfg) ? (
+          <div className="text-xs text-ink-400 mono">
+            <span className="text-emerald-400">router</span> ·
+            <span className="text-accent-fg"> {currentCfg.backend}</span> ·
+            <span className="text-ink-200"> {currentCfg.model_ids.length}</span> modelos:{" "}
+            <span className="text-ink-200">{currentCfg.model_ids.join(", ")}</span>
+            <span className="text-ink-500"> — o client escolhe pelo campo "model" do request</span>
+          </div>
+        ) : (
           <div className="text-xs text-ink-400 mono">
             <span className="text-accent-fg">{currentCfg.backend}</span> ·
             ctx <span className="text-ink-200">{currentCfg.context_window.toLocaleString()}</span> ·
@@ -222,7 +231,7 @@ export function LaunchModal({ open, launchId, config, onClose }: Props) {
             np <span className="text-ink-200">{currentCfg.parallel_slots}</span>
             {currentCfg.n_cpu_moe > 0 && <> · ncmoe <span className="text-ink-200">{currentCfg.n_cpu_moe}</span></>}
           </div>
-        )}
+        ))}
         {lines.some((l) => l.text === "(reanexado)") && (
           <div className="bg-amber-950/30 border border-amber-800/60 text-amber-200 text-xs rounded p-2 flex items-start gap-2">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />

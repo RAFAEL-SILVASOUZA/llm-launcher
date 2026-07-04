@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .builder import build_command_from_cfg
+from .builder import build_command_from_cfg, build_router_command, build_router_preset
 from .config_store import append_fail_history, save_config
 from .constants import LOAD_OK_PATTERNS, STABILIZE_SECONDS
 from .failure import Failure, classify_failure, next_degrade
@@ -187,6 +187,91 @@ def stop_lms_server_if_running() -> None:
             subprocess.run([str(LMS), "server", "stop"], timeout=10)
     except Exception:
         pass
+
+
+# Preset do modo router — regravado a cada launch múltiplo. Vive ao lado do
+# api_running.json (pasta api/), fora das pastas de modelos do usuário.
+ROUTER_PRESET_FILE = Path(__file__).resolve().parent.parent / "router_preset.ini"
+
+
+def run_router_server(
+    cfgs: list[dict],
+    router_cfg: dict,
+    on_event: EventCallback,
+    handle: LaunchHandle | None = None,
+    stop_lms: bool = True,
+    on_proc_pid: Callable[[int], None] | None = None,
+) -> None:
+    """Sobe o llama-server em MODO ROUTER com N modelos (um por seção do
+    preset INI, todos com load-on-startup). Sem escada de auto-degrade: quem
+    cai é o processo filho de UM modelo e o próprio router o gerencia/recarrega;
+    se o ROUTER inteiro morrer, reportamos e desistimos — degradar uma config
+    específica não faz sentido aqui. Cancel e restart manual funcionam igual
+    ao launch normal (kill na árvore inteira mata router + filhos).
+    """
+    if handle is None:
+        handle = LaunchHandle()
+    if stop_lms:
+        stop_lms_server_if_running()
+
+    try:
+        preset_text, names = build_router_preset(cfgs)
+        ROUTER_PRESET_FILE.write_text(preset_text, encoding="utf-8")
+        cmd = build_router_command(cfgs, ROUTER_PRESET_FILE)
+    except Exception as e:
+        on_event({"type": "giveup", "reason": f"build do router falhou: {e}"})
+        return
+
+    attempt = 0
+    while True:
+        if handle.cancelled():
+            on_event({"type": "giveup", "reason": "cancelled"})
+            return
+
+        attempt += 1
+        on_event({"type": "start", "attempt": attempt, "cmd": cmd,
+                  "config": {**router_cfg, "model_ids": names}})
+        on_event({"type": "stdout", "line": f"── preset: {ROUTER_PRESET_FILE} ──"})
+        for line in preset_text.splitlines():
+            on_event({"type": "stdout", "line": f"    {line}"})
+
+        def on_load() -> None:
+            on_event({"type": "load_ok", "attempt": attempt})
+
+        def on_line(line: str) -> None:
+            on_event({"type": "stdout", "line": line})
+
+        rc, output, load_ts = _run_capturing(
+            cmd, handle, on_line, on_load, on_proc_pid=on_proc_pid,
+        )
+        on_event({"type": "exit", "attempt": attempt, "rc": rc, "load_ts": load_ts})
+
+        if handle.cancelled():
+            on_event({"type": "giveup", "reason": "cancelled"})
+            return
+
+        # Restart manual (botão da UI): mata router + filhos e sobe de novo
+        # com o mesmo preset.
+        if handle.consume_restart():
+            on_event({"type": "manual_restart", "attempt": attempt + 1})
+            slept = 0.0
+            while slept < 1.0:
+                if handle.cancelled():
+                    on_event({"type": "giveup", "reason": "cancelled"})
+                    return
+                time.sleep(0.25)
+                slept += 0.25
+            continue
+
+        if rc == 0:
+            on_event({"type": "done", "attempt": attempt})
+            return
+
+        excerpt = "\n".join(output.splitlines()[-15:])
+        on_event({"type": "failure", "category": "ROUTER_EXIT",
+                  "excerpt": excerpt, "attempt": attempt})
+        on_event({"type": "giveup", "reason": "router_exit", "excerpt": excerpt})
+        return
 
 
 def run_server_resiliently(

@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Settings, HardDrive, Download, Cpu, Loader2, SlidersHorizontal, Plug } from "lucide-react";
 import { api, downloadEventsStream } from "./api/client";
 import type {
-  BackendStatus, Estimate, HfDownloadEvent, HfDownloadPlan, LaunchConfig,
-  ModelInfo, Options, SystemInfo,
+  ActiveLaunchConfig, BackendStatus, Estimate, HfDownloadEvent, HfDownloadPlan,
+  LaunchConfig, ModelInfo, Options, SystemInfo,
 } from "./api/types";
 
 export type DownloadProgress = { dl: number; total: number; speed: number; done?: boolean };
@@ -37,7 +37,7 @@ export default function App() {
   const [editorInitial, setEditorInitial] = useState<Partial<LaunchConfig> | null>(null);
 
   const [launchId, setLaunchId] = useState<string | null>(null);
-  const [launchCfg, setLaunchCfg] = useState<LaunchConfig | null>(null);
+  const [launchCfg, setLaunchCfg] = useState<ActiveLaunchConfig | null>(null);
   const [launchModalOpen, setLaunchModalOpen] = useState(false);
 
   // ─── Download state: vive aqui (não na DownloadPage) pra sobreviver à
@@ -93,11 +93,16 @@ export default function App() {
           cache_ram: c.cache_ram, mode: "server",
         }))).then((results) => {
           const map: Record<string, Estimate> = {};
-          for (const r of results) {
+          // Resposta vem na MESMA ordem dos items enviados — chaveia pelo id
+          // da config (mesma chave que o grid usa via cfgKey), não por
+          // model|backend, que colide com configs duplicadas e não bate com
+          // o lookup do grid quando a config tem id.
+          results.forEach((r, i) => {
             if (r.ok && r.estimate) {
-              map[`${r.model}|${r.backend}`] = r.estimate;
+              const c = cfgs[i];
+              map[c.id ?? `${c.model}|${c.backend}`] = r.estimate;
             }
-          }
+          });
           setEstimates(map);
         }).catch(() => { /* silencioso — só apaga as bolinhas */ });
       } else {
@@ -137,7 +142,13 @@ export default function App() {
         if (cancelled) return;
         try {
           const ev = JSON.parse(msg.data) as HfDownloadEvent;
-          setDownloadEvents((prev) => [...prev, ev]);
+          // Progress NÃO entra no array de eventos: chegam ~2.5/s durante o
+          // download inteiro, o array crescia sem limite e cada tick
+          // re-renderizava o App todo — a UI "travava" enquanto baixava.
+          // A barra de progresso usa só o map downloadProgress.
+          if (ev.type !== "progress") {
+            setDownloadEvents((prev) => [...prev, ev]);
+          }
           if (ev.type === "progress") {
             setDownloadProgress((p) => ({
               ...p,
@@ -210,12 +221,31 @@ export default function App() {
     // Salva primeiro pra obter o id atribuído pelo backend, e lança ESSA config
     // (com id) — assim o launch não cria uma 2ª entrada e o auto-degrade
     // atualiza a config certa.
-    const { config } = await api.saveConfig(cfg);
-    const r = await api.launch(config);
-    setLaunchCfg(config);
-    setLaunchId(r.launch_id);
-    setLaunchModalOpen(true);
-    setEditorOpen(false);
+    try {
+      const { config } = await api.saveConfig(cfg);
+      const r = await api.launch(config);
+      setLaunchCfg(config);
+      setLaunchId(r.launch_id);
+      setLaunchModalOpen(true);
+      setEditorOpen(false);
+    } catch (e) {
+      // Ex.: 409 — já existe um launch ativo (um por vez).
+      setError((e as Error).message);
+    }
+    await refresh();
+  };
+
+  // Launch múltiplo: modo router do llama-server — N configs sobem juntas,
+  // cada uma num processo filho; o client escolhe pelo campo "model".
+  const handleLaunchRouter = async (ids: string[]) => {
+    try {
+      const r = await api.launchRouter(ids);
+      setLaunchCfg(r.config);
+      setLaunchId(r.launch_id);
+      setLaunchModalOpen(true);
+    } catch (e) {
+      setError((e as Error).message);
+    }
     await refresh();
   };
 
@@ -329,8 +359,10 @@ export default function App() {
                 onDuplicate={handleDuplicate}
                 onDelete={handleDeleteConfig}
                 onLaunch={handleLaunch}
+                onLaunchRouter={handleLaunchRouter}
                 onNew={handleNew}
                 activeLaunchCfg={launchCfg}
+                launchActive={launchId !== null}
                 onStopLaunch={handleStopLaunch}
                 onRestartLaunch={handleRestartLaunch}
                 onOpenLaunchLogs={handleOpenLaunchLogs}

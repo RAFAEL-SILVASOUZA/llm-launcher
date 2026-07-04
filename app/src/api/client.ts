@@ -24,6 +24,7 @@ import type {
   ModelInfo,
   NvidiaStatus,
   Options,
+  RouterLaunchConfig,
   SystemInfo,
 } from "./types";
 
@@ -168,6 +169,12 @@ export const api = {
     jsonFetch<{ launch_id: string }>("/api/launch", {
       method: "POST",
       body: JSON.stringify(cfg),
+    }),
+  // Modo router: sobe N configs de uma vez (llama-server --models-preset).
+  launchRouter: (ids: string[]) =>
+    jsonFetch<{ launch_id: string; config: RouterLaunchConfig }>("/api/launch-router", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
     }),
   cancelLaunch: (id: string) =>
     jsonFetch<{ ok: boolean }>(`/api/launch/${id}/cancel`, { method: "POST" }),

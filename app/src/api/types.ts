@@ -137,15 +137,30 @@ export type Estimate = {
   ram_avail: number | null;
 };
 
+// Launch múltiplo (modo router do llama-server): config sintética que o
+// backend devolve no lugar de uma LaunchConfig quando N modelos sobem juntos.
+export type RouterLaunchConfig = {
+  router: true;
+  backend: string;
+  config_ids: string[];   // ids das configs selecionadas na grid
+  model_ids: string[];    // nomes das seções do preset = valor do campo "model" nos requests
+  models: string[];       // paths dos .gguf
+};
+
+export type ActiveLaunchConfig = LaunchConfig | RouterLaunchConfig;
+
+export const isRouterConfig = (c: ActiveLaunchConfig): c is RouterLaunchConfig =>
+  "router" in c && c.router === true;
+
 export type ActiveLaunch = {
   launch_id: string;
   attached: boolean;
   pid: number | null;
-  config: LaunchConfig;
+  config: ActiveLaunchConfig;
 };
 
 export type LaunchEvent =
-  | { type: "start"; attempt: number; cmd: string; config: LaunchConfig }
+  | { type: "start"; attempt: number; cmd: string; config: ActiveLaunchConfig }
   | { type: "stdout"; line: string }
   | { type: "load_ok"; attempt: number }
   | { type: "exit"; attempt: number; rc: number; load_ts: number | null }
