@@ -32,7 +32,7 @@ jobs:
 
       - name: Sincroniza versão com a tag (v0.2.0 -> 0.2.0)
         shell: bash
-        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
 
       - name: Instala dependências
         run: npm ci
