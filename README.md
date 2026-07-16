@@ -132,7 +132,7 @@ O launcher precisa saber **duas coisas**: onde estão seus **modelos (.gguf)** e
 Existem dois lugares onde isso é definido:
 
 1. **Defaults no código** — `app/api/core/constants.py` (APP) e o topo de `models.py` (CLI) trazem caminhos padrão:
-   - Modelos: `C:\Users\PC\.lmstudio\models` (pasta do LM Studio)
+   - Modelos: `D:\models` (pasta do LM Studio)
    - Binários vanilla: `C:\Projetos\llama-cpp\build\bin\Release`
    - Binários turbo: `C:\Projetos\llama-cpp-turboquant\build\bin\Release`
 

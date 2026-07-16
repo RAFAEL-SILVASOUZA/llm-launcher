@@ -5,7 +5,7 @@ como dicts JSON-serializáveis pro frontend mostrar as mesmas opções da CLI.
 """
 from pathlib import Path
 
-MODELS_DIR  = Path(r"C:\Users\PC\.lmstudio\models")
+MODELS_DIR  = Path(r"D:\models")
 LMS         = Path(r"C:\Users\PC\.lmstudio\bin\lms.exe")
 CONFIG_FILE = Path(r"C:\Projetos\llama-cpp-turboquant\last_config.json")
 FAIL_HISTORY_FILE = Path(r"C:\Projetos\llama-cpp-turboquant\fail_history.jsonl")

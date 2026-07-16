@@ -14,7 +14,7 @@ import questionary
 sys.path.insert(0, str(Path(__file__).parent / "app"))
 from api.core import sampling as sampling_core  # noqa: E402
 
-MODELS_DIR  = Path(r"C:\Users\PC\.lmstudio\models")
+MODELS_DIR  = Path(r"D:\models")
 
 # ─── backends de llama.cpp disponíveis ────────────────────────────────────────
 # Cada backend tem seu binário próprio, capacidades distintas e features que só
