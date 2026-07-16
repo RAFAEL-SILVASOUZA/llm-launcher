@@ -105,6 +105,20 @@ def backend_supports_flag(flag: str, backend: str, mode: str = "server") -> bool
     return flag in help_text
 
 
+def kv_unified_active(backend: str, kv_unified: bool = True, mode: str = "server") -> bool:
+    """Se o KV vai ser um pool ÚNICO compartilhado pelos slots -np.
+
+    llama-context.cpp decide o contexto por sequência a partir disso:
+        -kvu   → n_ctx_seq = n_ctx           (os -np slots dividem um pool só)
+        sem    → n_ctx_seq = n_ctx / n_seq_max  (cada slot tem o seu, KV × np)
+
+    builder e estimator PRECISAM concordar aqui: um decide se multiplica o -c
+    pelos slots, o outro conta o KV. Chamar esta função é o que mantém os dois
+    em sincronia — não checar a flag na mão.
+    """
+    return bool(kv_unified) and backend_supports_flag("--kv-unified", backend, mode)
+
+
 def probe_kv_types(backend: str, mode: str = "server") -> set[str]:
     """Lê os tipos de --cache-type-k aceitos via parse do --help. Cacheado."""
     cache_key = (backend, mode)

@@ -6,7 +6,7 @@ MoE, SWA, MTP) pra prever quanto vai pra GPU e quanto pra CPU.
 """
 from pathlib import Path
 
-from .backends import remap_kv_for_backend
+from .backends import kv_unified_active, remap_kv_for_backend
 from .gguf import read_meta
 from .models_repo import is_mtp_model, model_disk_size_mib
 from .nvidia import gpu_free_mib, gpu_total_mib, ram_total_mib
@@ -38,8 +38,10 @@ _MMPROJ_COMPUTE_MIB       = 250
 _WEIGHT_OVERHEAD          = 1.02
 
 
-def _kv_cache_mib(meta: dict, ctx: int, parallel: int,
+def _kv_cache_mib(meta: dict, ctx: int, streams: int,
                   bytes_pe_k: float, bytes_pe_v: float) -> int:
+    """MiB de KV. `streams` = cópias do contexto: 1 com pool unificado (-kvu),
+    senão uma por slot -np (ver kv_unified_active)."""
     n_layer = meta["n_layer"]
     nk      = meta["n_head_kv"]
     n_kv_per_layer: list[int] = nk if isinstance(nk, list) else [int(nk)] * n_layer
@@ -66,7 +68,7 @@ def _kv_cache_mib(meta: dict, ctx: int, parallel: int,
         h_v       = head_dim_v_swa if is_swa else head_dim_v
         n_kv_i    = int(n_kv_per_layer[i])
         per_token = n_kv_i * (h_k * bytes_pe_k + h_v * bytes_pe_v)
-        total_bytes += per_token * layer_ctx * parallel
+        total_bytes += per_token * layer_ctx * streams
     return int(total_bytes / _MIB)
 
 
@@ -144,6 +146,7 @@ def estimate_memory(
     cache_ram:      int,
     mode:           str,
     n_cpu_moe:      int = 0,
+    kv_unified:     bool = True,
 ) -> dict:
     """Estima componentes de VRAM/RAM (em MiB) para a config corrente."""
     meta = read_meta(model_path)
@@ -164,11 +167,18 @@ def estimate_memory(
         if n_kv_typ and meta.get("n_head", 0) > n_kv_typ:
             kv_eff_k = "q8_0"
     bytes_pe_k   = KV_BYTES_PER_ELEM.get(kv_eff_k, bytes_pe)
+    # Pool unificado (-kvu) = uma cópia do contexto pros -np slots; sem ele, uma
+    # por slot. Tem que casar com o -c que o builder emite, senão a estimativa
+    # erra por np×.
+    kv_streams   = 1 if kv_unified_active(backend, kv_unified, mode) else max(1, parallel_slots)
     kv_total_mib = (
-        _kv_cache_mib(meta, context_window, parallel_slots, bytes_pe_k, bytes_pe)
+        _kv_cache_mib(meta, context_window, kv_streams, bytes_pe_k, bytes_pe)
         if meta else 0
     )
 
+    # Estado recorrente do híbrido SSM continua sendo POR SEQUÊNCIA mesmo com
+    # -kvu (llama-model.cpp passa recurrent_rs_size = n_seq_max independente de
+    # unified) — o pool compartilhado é só do KV de atenção.
     ssm_state_mib = 0
     if meta:
         per_ssm = meta.get("ssm_state_per_layer_mib", 0.0)

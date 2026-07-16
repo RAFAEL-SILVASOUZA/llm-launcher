@@ -384,7 +384,7 @@ export function ConfigEditor({
 
           <Section title="Contexto & KV">
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Context window (por slot)">
+              <Field label="Context window (pool -kvu)">
                 <SelectFromOptions
                   options={options.context_window}
                   value={cfg.context_window}

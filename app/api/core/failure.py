@@ -7,7 +7,7 @@ qualidade até onde der, sem mexer no context window (decisão do usuário).
 """
 import re
 
-from .backends import next_kv_tier, remap_kv_for_backend
+from .backends import kv_unified_active, next_kv_tier, remap_kv_for_backend
 from .constants import (
     KV_REJECTED_PATTERNS,
     MMPROJ_ERROR_PATTERNS,
@@ -68,6 +68,13 @@ def _extract_unknown_flag(error_excerpt: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _parallel_reason(cfg: dict, np_: int, new_np: int) -> str:
+    """Cortar slots só derruba KV quando cada slot tem o seu contexto."""
+    if kv_unified_active(cfg.get("backend", "turbo"), cfg.get("kv_unified", True)):
+        return f"parallel {np_} → {new_np} (libera estado SSM + compute; KV é pool único, não muda)"
+    return f"parallel {np_} → {new_np} (KV escala linear com slots)"
+
+
 def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | None, str | None]:
     """Aplica UM degrau na config. Devolve (nova_cfg, descrição) ou (None, None).
 
@@ -90,6 +97,12 @@ def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | No
         if flag == "--chat-template-kwargs" and cfg.get("preserve_thinking"):
             cfg["preserve_thinking"] = False
             return cfg, "removido --chat-template-kwargs (build não suporta)"
+        # Sem -kvu o builder volta a multiplicar o -c pelos slots, senão o
+        # llama.cpp repartiria o contexto e cortaria a janela em silêncio. O
+        # preço é KV × slots — se não couber, a escada continua daqui.
+        if flag in ("--kv-unified", "-kvu") and cfg.get("kv_unified", True):
+            cfg["kv_unified"] = False
+            return cfg, "removido --kv-unified (build não suporta) — KV volta a ser × slots"
 
     if failure == Failure.KV_TYPE_REJECTED:
         new_kv, _ = remap_kv_for_backend(cfg.get("kv_cache", "f16"), backend, "server")
@@ -108,7 +121,7 @@ def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | No
         if np_ > 1:
             new_np = max(1, np_ // 2)
             cfg["parallel_slots"] = new_np
-            return cfg, f"parallel {np_} → {new_np} (KV escala linear com slots)"
+            return cfg, _parallel_reason(cfg, np_, new_np)
 
     if not cfg.get("flash_attn", True):
         cfg["flash_attn"] = True
@@ -118,7 +131,7 @@ def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | No
     if np_ > 1:
         new_np = max(1, np_ // 2)
         cfg["parallel_slots"] = new_np
-        return cfg, f"parallel {np_} → {new_np} (KV escala linear com slots)"
+        return cfg, _parallel_reason(cfg, np_, new_np)
 
     cur_kv = cfg.get("kv_cache", "f16")
     nxt_kv = next_kv_tier(cur_kv, backend)

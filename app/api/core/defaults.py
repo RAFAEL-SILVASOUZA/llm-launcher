@@ -143,6 +143,10 @@ def suggest_config(model_path: Path, backend: str = "vanilla", mode: str = "serv
         "gpu_layers":       gpu_layers,
         "n_cpu_moe":        n_cpu_moe,
         "parallel_slots":   1,
+        # Pool de KV único pros slots -np (o -kvu do llama.cpp, ligado por
+        # padrão no LM Studio também). Não é opção de UI: só o auto-degrade
+        # desliga, quando o build não tem a flag.
+        "kv_unified":       True,
         "reasoning_budget": reasoning_budget,
         "preserve_thinking": False,
         "mlock":            False,

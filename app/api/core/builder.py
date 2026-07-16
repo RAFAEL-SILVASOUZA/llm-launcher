@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from . import sampling
-from .backends import backend_binary, backend_supports_flag
+from .backends import backend_binary, backend_supports_flag, kv_unified_active
 from .constants import BACKENDS, CPU_THREADS_BATCH, CPU_THREADS_GEN
 from .defaults import REASONING_BUDGET_MESSAGE
 from .models_repo import is_mtp_model, make_alias
@@ -56,6 +56,7 @@ def build_server_command(
     max_tokens:       int,
     cache_ram:        int,
     ctx_checkpoints:  int,
+    kv_unified:       bool = True,
     n_cpu_moe:        int = 0,
     spec_draft_n_max: int = 2,
     preserve_thinking: bool = False,
@@ -77,8 +78,15 @@ def build_server_command(
     if mmproj:
         cmd += f' --mmproj "{mmproj}"'
 
+    # -c é o contexto TOTAL, e o llama.cpp reparte entre os slots -np. Com -kvu
+    # ele não reparte (n_ctx_seq = n_ctx): os slots dividem um pool só, e
+    # context_window é tanto o pool quanto o teto de UMA request — a semântica do
+    # LM Studio. Sem -kvu, cada slot precisa da sua fatia, então o -c multiplica e
+    # o KV custa np×. As duas pernas mantêm a mesma promessa: uma request sempre
+    # endereça context_window tokens.
+    unified = kv_unified_active(backend, kv_unified)
     cmd += f' --alias "{alias}"'
-    cmd += f' -c {context_window * parallel_slots}'
+    cmd += f' -c {context_window if unified else context_window * parallel_slots}'
     cmd += f' -ngl {gpu_layers}'
     cmd += _multi_gpu_flags(split_mode, tensor_split, main_gpu)
     if n_cpu_moe and n_cpu_moe > 0:
@@ -88,6 +96,8 @@ def build_server_command(
     cmd += f' -b {batch_size} -ub {ubatch_size}'
     cmd += f' -t {threads_gen} -tb {threads_batch}'
     cmd += f' -np {parallel_slots}'
+    if unified:
+        cmd += ' -kvu'
     cmd += f' -n {max_tokens}'
 
     # Samplers: DEFAULTS do servidor (o request do client ainda sobrescreve).
@@ -232,8 +242,11 @@ def _router_section_lines(cfg: dict) -> list[str]:
     if mmproj:
         add("mmproj", str(Path(mmproj)))
 
+    # ctx-size/kv-unified: mesma regra do build_server_command — com pool
+    # compartilhado o ctx não multiplica pelos slots.
     parallel = cfg.get("parallel_slots", 1)
-    add("ctx-size", cfg["context_window"] * parallel)
+    unified  = kv_unified_active(cfg.get("backend", "turbo"), cfg.get("kv_unified", True))
+    add("ctx-size", cfg["context_window"] if unified else cfg["context_window"] * parallel)
     add("n-gpu-layers", cfg.get("gpu_layers", 99))
 
     split_mode = cfg.get("split_mode")
@@ -259,6 +272,8 @@ def _router_section_lines(cfg: dict) -> list[str]:
     add("threads", cfg.get("threads_gen", CPU_THREADS_GEN))
     add("threads-batch", cfg.get("threads_batch", CPU_THREADS_BATCH))
     add("parallel", parallel)
+    if unified:
+        add("kv-unified", "true")
     add("n-predict", cfg.get("max_tokens", 8_192))
 
     # Samplers por modelo — mesma resolução do build_server_command.
@@ -387,6 +402,7 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
             max_tokens=cfg.get("max_tokens", 8_192),
             cache_ram=cfg.get("cache_ram", 8_192),
             ctx_checkpoints=cfg.get("ctx_checkpoints", 8),
+            kv_unified=cfg.get("kv_unified", True),
             n_cpu_moe=cfg.get("n_cpu_moe", 0),
             spec_draft_n_max=cfg.get("spec_draft_n_max", 2),
             preserve_thinking=cfg.get("preserve_thinking", False),

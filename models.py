@@ -372,6 +372,27 @@ def _backend_supports_chat_template_kwargs(backend: str, mode: str) -> bool:
     return "--chat-template-kwargs" in help_text
 
 
+def _backend_supports_flag(flag: str, backend: str, mode: str = "server") -> bool:
+    """True se o binário lista `flag` no --help. Sem probe, assume suporte."""
+    help_text = _backend_help_text(backend, mode)
+    if not help_text:
+        return True
+    return flag in help_text
+
+
+def _kv_unified_active(backend: str, kv_unified: bool = True, mode: str = "server") -> bool:
+    """Se o KV vai ser um pool ÚNICO compartilhado pelos slots -np.
+
+    llama-context.cpp decide o contexto por sequência a partir disso:
+        -kvu   → n_ctx_seq = n_ctx           (os -np slots dividem um pool só)
+        sem    → n_ctx_seq = n_ctx / n_seq_max  (cada slot tem o seu, KV × np)
+
+    build_command e estimate_memory PRECISAM concordar aqui: um decide se
+    multiplica o -c pelos slots, o outro conta o KV.
+    """
+    return bool(kv_unified) and _backend_supports_flag("--kv-unified", backend, mode)
+
+
 # Fallback estático caso o probe --help falhe (binário ausente, timeout, regex
 # não casa). Cobre o que sabemos que os 3 backends compilados oferecem hoje.
 _KV_TYPES_FALLBACK: dict[str, set[str]] = {
@@ -832,6 +853,13 @@ def _extract_unknown_flag(error_excerpt: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _parallel_reason(cfg: dict, np_: int, new_np: int) -> str:
+    """Cortar slots só derruba KV quando cada slot tem o seu contexto."""
+    if _kv_unified_active(cfg.get("backend", "turbo"), cfg.get("kv_unified", True)):
+        return f"parallel {np_} → {new_np} (libera estado SSM + compute; KV é pool único, não muda)"
+    return f"parallel {np_} → {new_np} (KV escala linear com slots)"
+
+
 def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | None, str | None]:
     """Aplica UM degrau na config preservando velocidade/qualidade até onde dá.
     Devolve (nova_cfg, descricao) ou (None, None) se a escada acabou.
@@ -858,6 +886,12 @@ def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | No
         if flag == "--chat-template-kwargs" and cfg.get("preserve_thinking"):
             cfg["preserve_thinking"] = False
             return cfg, "removido --chat-template-kwargs (build não suporta)"
+        # Sem -kvu o build_command volta a multiplicar o -c pelos slots, senão o
+        # llama.cpp repartiria o contexto e cortaria a janela em silêncio. O
+        # preço é KV × slots — se não couber, a escada continua daqui.
+        if flag in ("--kv-unified", "-kvu") and cfg.get("kv_unified", True):
+            cfg["kv_unified"] = False
+            return cfg, "removido --kv-unified (build não suporta) — KV volta a ser × slots"
         # Sem mapeamento direto: cai pra escada genérica abaixo.
 
     if failure == Failure.KV_TYPE_REJECTED:
@@ -879,7 +913,7 @@ def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | No
         if np_ > 1:
             new_np = max(1, np_ // 2)
             cfg["parallel_slots"] = new_np
-            return cfg, f"parallel {np_} → {new_np} (KV escala linear com slots)"
+            return cfg, _parallel_reason(cfg, np_, new_np)
 
     # Escada genérica de VRAM (OOM_LOAD, UNKNOWN, ou continuação de OOM_RUNTIME
     # depois que os atalhos acima esgotaram).
@@ -891,7 +925,7 @@ def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | No
     if np_ > 1:
         new_np = max(1, np_ // 2)
         cfg["parallel_slots"] = new_np
-        return cfg, f"parallel {np_} → {new_np} (KV escala linear com slots)"
+        return cfg, _parallel_reason(cfg, np_, new_np)
 
     cur_kv = cfg.get("kv_cache", "f16")
     nxt_kv = _next_kv_tier(cur_kv, backend)
@@ -940,6 +974,7 @@ def _build_cmd_from_cfg(cfg: dict) -> str:
         flash_attn=cfg.get("flash_attn", True),
         gpu_layers=cfg.get("gpu_layers", 99),
         parallel_slots=cfg.get("parallel_slots", 1),
+        kv_unified=cfg.get("kv_unified", True),
         batch_size=cfg.get("batch_size", 2_048),
         ubatch_size=cfg.get("ubatch_size", 512),
         threads_gen=cfg.get("threads_gen", CPU_THREADS_GEN),
@@ -1170,7 +1205,7 @@ def run_with_lms(model_path: Path, context_window: int, parallel_slots: int) -> 
 
 def ask_context_window() -> int:
     selected = questionary.select(
-        "📏 Janela de contexto (por slot — cada slot -np recebe esta janela inteira):",
+        "📏 Janela de contexto (teto de UMA request; os slots -np dividem este pool):",
         choices=CONTEXT_CHOICES,
     ).ask()
     if selected == 0:
@@ -2190,13 +2225,16 @@ def _gguf_meta(model_path: Path) -> dict | None:
     return meta
 
 
-def _kv_cache_mib(meta: dict, ctx: int, parallel: int,
+def _kv_cache_mib(meta: dict, ctx: int, streams: int,
                   bytes_pe_k: float, bytes_pe_v: float) -> int:
     """Calcula o KV cache total em MiB, respeitando per-layer n_head_kv e SWA.
 
     K e V têm bytes-por-elemento separados: o build turboquant promove o K de
     turbo2/3/4 pra q8_0 em modelos GQA (auto-asymmetric). Quem decide os tipos
     efetivos de K e V é estimate_memory.
+
+    `streams` = cópias do contexto: 1 com pool unificado (-kvu), senão uma por
+    slot -np (ver _kv_unified_active).
     """
     n_layer = meta["n_layer"]
     nk      = meta["n_head_kv"]
@@ -2228,7 +2266,7 @@ def _kv_cache_mib(meta: dict, ctx: int, parallel: int,
         h_v       = head_dim_v_swa if is_swa else head_dim_v
         n_kv_i    = int(n_kv_per_layer[i])
         per_token = n_kv_i * (h_k * bytes_pe_k + h_v * bytes_pe_v)
-        total_bytes += per_token * layer_ctx * parallel
+        total_bytes += per_token * layer_ctx * streams
     return int(total_bytes / _MIB)
 
 
@@ -2450,6 +2488,7 @@ def estimate_memory(
     cache_ram:      int,
     mode:           str,
     n_cpu_moe:      int = 0,
+    kv_unified:     bool = True,
 ) -> dict:
     """Estima componentes de VRAM/RAM (em MiB) para a config corrente."""
     meta        = _gguf_meta(model_path)
@@ -2479,8 +2518,11 @@ def estimate_memory(
         if n_kv_typ and meta.get("n_head", 0) > n_kv_typ:
             kv_eff_k = "q8_0"
     bytes_pe_k   = _KV_BYTES_PER_ELEM.get(kv_eff_k, bytes_pe)
+    # Pool unificado (-kvu) = uma cópia do contexto pros -np slots; sem ele, uma
+    # por slot. Tem que casar com o -c que build_command emite.
+    kv_streams   = 1 if _kv_unified_active(backend, kv_unified, mode) else max(1, parallel_slots)
     kv_total_mib = (
-        _kv_cache_mib(meta, context_window, parallel_slots, bytes_pe_k, bytes_pe)
+        _kv_cache_mib(meta, context_window, kv_streams, bytes_pe_k, bytes_pe)
         if meta else 0
     )
 
@@ -2935,6 +2977,7 @@ def build_command(
     max_tokens:       int,
     cache_ram:        int,
     ctx_checkpoints:  int,
+    kv_unified:       bool = True,
     n_cpu_moe:        int = 0,
     spec_draft_n_max: int = 2,
     spec_dflash_draft: str | None = None,
@@ -2963,11 +3006,14 @@ def build_command(
     if mmproj:
         cmd += f' --mmproj "{mmproj}"'
 
+    # -c no llama-server é o KV cache TOTAL, repartido entre os -np slots. Com
+    # -kvu ele não reparte (n_ctx_seq = n_ctx): os slots dividem um pool só, e
+    # context_window é o pool e o teto de UMA request — a semântica do LM Studio.
+    # Sem -kvu, cada slot precisa da sua fatia: o -c multiplica e o KV custa np×.
+    # Nos dois casos uma request endereça context_window tokens.
+    unified = _kv_unified_active(backend, kv_unified)
     cmd += f' --alias "{alias}"'
-    # -c no llama-server é o KV cache TOTAL, repartido igualmente entre os -np
-    # slots. Multiplicar por parallel_slots faz cada slot receber context_window
-    # inteiro (semântica "janela por slot" — alinha com o estimador e o aviso).
-    cmd += f' -c {context_window * parallel_slots}'
+    cmd += f' -c {context_window if unified else context_window * parallel_slots}'
     cmd += f' -ngl {gpu_layers}'
     cmd += _multi_gpu_flags(split_mode, tensor_split, main_gpu)
     if n_cpu_moe and n_cpu_moe > 0:
@@ -2977,6 +3023,8 @@ def build_command(
     cmd += f' -b {batch_size} -ub {ubatch_size}'
     cmd += f' -t {threads_gen} -tb {threads_batch}'
     cmd += f' -np {parallel_slots}'
+    if unified:
+        cmd += ' -kvu'
     cmd += f' -n {max_tokens}'
 
     # ── Samplers (DEFAULTS do servidor; o request do client sobrescreve) ───
@@ -3223,7 +3271,7 @@ def main():
         ncmoe_str = str(ncmoe) if ncmoe else "—"
 
         print(f"│  Backend         : {backend}")
-        print(f"│  Contexto        : {ctx_str}  (por slot)")
+        print(f"│  Contexto        : {ctx_str}  (pool, dividido pelos slots)")
         print(f"│  KV Cache        : {prev_cfg.get('kv_cache', '?')}")
         print(f"│  Flash Attention : {prev_cfg.get('flash_attn', '?')}")
         print(f"│  GPU Layers      : {prev_cfg.get('gpu_layers', '?')}")
@@ -3615,6 +3663,9 @@ def main():
         "gpu_layers":     gpu_layers,
         "n_cpu_moe":      n_cpu_moe,
         "parallel_slots": parallel_slots,
+        # Pool de KV único pros slots -np (-kvu). Só o auto-degrade desliga,
+        # quando o build não tem a flag.
+        "kv_unified":     True,
         "reasoning_budget": reasoning_budget,
         "preserve_thinking": preserve_thinking,
         "mlock":          mlock,

@@ -228,7 +228,7 @@ Campos da primeira parte:
 
 - **Modelo (.gguf)** — dropdown com tudo que o scanner achou nas pastas configuradas.
 - **Backend** — turboquant / vanilla / mtp (cards com descrição; desabilitado se o binário não existir).
-- **Context window (por slot)** e **Slots paralelos (`-np`)** — atenção: o KV total é `contexto × slots`.
+- **Context window** e **Slots paralelos (`-np`)** — o launcher emite `--kv-unified`, então o contexto é um **pool único** que os slots dividem (é o que o LM Studio faz por padrão): o KV custa `contexto × 1`, e não `× slots`. Uma request sozinha pode usar o pool inteiro; várias simultâneas disputam. Se o build não tiver a flag, o `-c` volta a ser multiplicado pelos slots para não encolher a janela em silêncio — e aí o KV custa `× slots` mesmo.
 - **KV cache (`--cache-type-k/v`)** — de `f16` (padrão) a quantizados (`q8_0`, `q4_0`…); os tipos `turbo2/3/4` só aparecem no backend turboquant.
 - **Flash Attention (`-fa`)** — liga/desliga.
 - **GPU / Offload (`-ngl`)** — quantas camadas vão para a GPU, com botão **"sugerir -ngl"** que calcula o máximo que cabe na VRAM. Para modelos MoE há também o `-ncmoe` (camadas de experts na CPU).
