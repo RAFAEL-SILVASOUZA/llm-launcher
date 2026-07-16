@@ -8,6 +8,12 @@ from pathlib import Path
 
 import questionary
 
+# Samplers vêm de app/api/core/sampling.py — fonte ÚNICA, compartilhada com o app.
+# Duplicar a resolução aqui é exatamente como o preset de código acabou sendo
+# servido pra modelo de raciocínio: duas cópias, uma só foi corrigida.
+sys.path.insert(0, str(Path(__file__).parent / "app"))
+from api.core import sampling as sampling_core  # noqa: E402
+
 MODELS_DIR  = Path(r"C:\Users\PC\.lmstudio\models")
 
 # ─── backends de llama.cpp disponíveis ────────────────────────────────────────
@@ -595,6 +601,14 @@ def collect_models() -> list[Path]:
 
 
 def is_thinking_model(model_path: Path) -> bool:
+    """Chat template do GGUF; keywords no nome são só fallback.
+
+    O nome do arquivo não diz se o modelo pensa (ornith-1.0-35b não tem nenhuma
+    palavra reveladora e é reasoning). O template diz: quem pensa abre com <think>.
+    """
+    meta = _gguf_meta(model_path)
+    if meta is not None:
+        return bool(meta.get("has_thinking_template"))
     name = model_path.name.lower()
     return any(kw in name for kw in THINKING_KEYWORDS)
 
@@ -2120,6 +2134,12 @@ def _gguf_meta(model_path: Path) -> dict | None:
     # com ela, o template mantém os blocos <think> de turnos anteriores no
     # histórico em vez de descartá-los. Ver build_command.
     chat_template = raw.get("tokenizer.chat_template") or ""
+    # E é o mesmo template que revela se o modelo PENSA: quem raciocina abre a
+    # resposta com <think> (ou expõe enable_thinking / reasoning_content).
+    has_thinking = any(
+        kw in chat_template.lower()
+        for kw in ("<think>", "enable_thinking", "reasoning_content")
+    )
 
     # Split exato de pesos GPU/CPU: o llama.cpp trata `output.weight` e
     # `token_embd.weight` como "layers" separadas das `blk.N.*`. Ordem real
@@ -2164,6 +2184,7 @@ def _gguf_meta(model_path: Path) -> dict | None:
         "ssm_state_per_layer_mib": ssm_state_per_layer_mib,
         # Template de chat referencia a variável `preserve_thinking`?
         "supports_preserve_thinking": "preserve_thinking" in chat_template,
+        "has_thinking_template":      has_thinking,
     }
     _GGUF_META_CACHE[key] = meta
     return meta
@@ -2958,25 +2979,17 @@ def build_command(
     cmd += f' -np {parallel_slots}'
     cmd += f' -n {max_tokens}'
 
-    # ── Rede de segurança anti-loop ────────────────────────────────────────
-    # São DEFAULTS do servidor: um request que mande seus próprios valores
-    # sobrescreve. Sem isto, um cliente que envia temperature=0 e nenhuma
-    # penalidade (padrão de agentes/tools) faz o modelo entrar em loop até
-    # estourar o contexto. DRY pune só repetição LITERAL de sequências — não
-    # machuca texto/código normal — mas precisa de janela limitada: sobre o
-    # contexto inteiro (default -1) passa a punir o próprio estilo do modelo em
-    # sessão longa e induz EOS precoce a partir de ~8k tokens de saída acumulada
-    # (A/B multi-turno 2026-06-11). Pelo mesmo motivo não usar presence-penalty
-    # como default — taxa todo token já visto, sem janela.
-    # DRY REMOVIDO: a premissa "não machuca código" é FALSA. Com --dry-allowed-length 4
-    # ele pune a repetição LEGÍTIMA de código (ex.: `this.getUser('1'), this.getUser('2')`),
-    # forçando o modelo a desviar e corromper o texto — dropar caractere ("thisgetUser"),
-    # trocar dígito ('2'->'3'), trocar aspas. Isso quebra applyPatch/edição exata e foi
-    # comprovado empiricamente (2026-06-17): mesmo prompt acerta de primeira sem DRY.
-    # Anti-loop agora vem de sampling saudável + repeat-penalty LEVE, que NÃO corrompe
-    # reprodução exata: temp/top-p/top-k dão diversidade e 1.05 já corta loop.
-    cmd += ' --temp 0.3 --top-p 0.8 --top-k 20'
-    cmd += ' --repeat-penalty 1.05'
+    # ── Samplers (DEFAULTS do servidor; o request do client sobrescreve) ───
+    # Resolvidos POR MODELO em app/api/core/sampling.py: preset de código pra
+    # não-thinking (0.3/0.8/1.05 — o validado em A/B), preset de raciocínio pra
+    # quem tem <think> no template, ou os números do próprio autor quando o
+    # generation_config.json veio no download.
+    # DRY continua fora: com --dry-allowed-length 4 ele pune a repetição LEGÍTIMA de
+    # código (`this.getUser('1'), this.getUser('2')`), forçando o modelo a corromper o
+    # texto — dropar caractere, trocar dígito/aspas — e quebrando applyPatch/edição
+    # exata (comprovado 2026-06-17). Presence-penalty idem: taxa todo token já visto,
+    # sem janela, e induz EOS precoce em sessão longa (A/B multi-turno 2026-06-11).
+    cmd += sampling_core.cli_flags(sampling_core.resolve(model_path))
     # Quando o contexto enche, descartar tokens antigos em silêncio apaga o
     # system prompt + schema das tools — é aí que "tools que sempre funcionam"
     # passam a falhar. --no-context-shift devolve erro limpo: o agente compacta
@@ -3080,15 +3093,10 @@ def build_cli_command(
     cmd += f' -t {threads_gen} -tb {threads_batch}'
     cmd += f' -n {max_tokens}'
 
-    # Rede de segurança anti-loop (ver build_command). No CLI interativo não
-    # passamos --no-context-shift: numa conversa de terminal é melhor o shift
-    # do que a sessão morrer com erro ao encher o contexto.
-    # DRY REMOVIDO (ver build_command): com --dry-allowed-length 4 ele pune a repetição
-    # LEGÍTIMA de código e corrompe a reprodução exata (dropa caractere, troca dígito/aspas),
-    # quebrando applyPatch. Comprovado empiricamente 2026-06-17. Anti-loop agora via sampling
-    # saudável + repeat-penalty LEVE (1.05), que não corrompe texto exato.
-    cmd += ' --temp 0.3 --top-p 0.8 --top-k 20'
-    cmd += ' --repeat-penalty 1.05'
+    # Samplers por modelo (ver build_command). No CLI interativo não passamos
+    # --no-context-shift: numa conversa de terminal é melhor o shift do que a
+    # sessão morrer com erro ao encher o contexto.
+    cmd += sampling_core.cli_flags(sampling_core.resolve(model_path))
 
     if reasoning_budget is not None:
         if reasoning_budget == 0:

@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 from typing import Iterator
 
+from . import sampling
 from .constants import MODELS_DIR
 from .models_repo import SPLIT_RE, gguf_group_key, is_mmproj
 
@@ -112,6 +113,73 @@ def hf_search_gguf(query: str, limit: int = 25) -> list[dict]:
                 "likes":     r.get("likes", 0) or 0,
             })
     return out
+
+
+# ─── generation_config.json: os samplers que o AUTOR publicou ───────────────
+# Fonte machine-readable de temperature/top_p/top_k/repetition_penalty. É o que
+# permite configurar um modelo novo sem depender de alguém ler o README.
+
+def _get_json(url: str, timeout: int = 15) -> dict | None:
+    try:
+        req = urllib.request.Request(url, headers=hf_headers())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+_QUANT_SUFFIX_RE = re.compile(r"[-_.](?:gguf|awq|gptq|mlx|exl2|i1)$", re.IGNORECASE)
+
+
+def _base_models(repo_id: str) -> list[str]:
+    """Repos onde procurar o generation_config quando o repo baixado não tem.
+
+    Repo de quant (bartowski, lmstudio-community, unsloth) quase nunca carrega
+    generation_config.json — mas aponta pro original. Duas trilhas, porque nenhuma
+    cobre sozinha:
+      1. `base_model` do card — é o que os quantizadores conhecidos preenchem;
+      2. o nome sem o sufixo de quant, no mesmo owner — é o caso do autor que
+         publica ele mesmo o GGUF (deepreinforce-ai/Ornith-1.0-35B-GGUF →
+         deepreinforce-ai/Ornith-1.0-35B) e não preenche base_model nenhum.
+    Candidato inexistente só vira um 404 barato, então tentar os dois sai de graça.
+    """
+    out: list[str] = []
+    info = _get_json(f"https://huggingface.co/api/models/{repo_id}")
+    card = (info or {}).get("cardData") or {}
+    base = card.get("base_model")
+    if isinstance(base, str):
+        base = [base]
+    if isinstance(base, list):
+        out += [b for b in base if isinstance(b, str) and "/" in b]
+
+    owner, _, name = repo_id.partition("/")
+    stripped = _QUANT_SUFFIX_RE.sub("", name)
+    if stripped != name:
+        out.append(f"{owner}/{stripped}")
+
+    seen: set[str] = set()
+    return [r for r in out if r != repo_id and not (r in seen or seen.add(r))]
+
+
+def fetch_generation_config(repo_id: str, branch: str = "main") -> dict | None:
+    """Samplers do autor: {..., "source": "generation_config", "from_repo": repo}.
+
+    Tenta o próprio repo e, se ele não tiver, os base_model do card (um nível —
+    quant → original é a cadeia real; mais que isso vira caça ao tesouro).
+    None quando ninguém publicou nada de sampling.
+    """
+    candidates = [(repo_id, branch)] + [(b, "main") for b in _base_models(repo_id)]
+    for rid, br in candidates:
+        gc = _get_json(f"https://huggingface.co/{rid}/resolve/{br}/generation_config.json")
+        vals = sampling.from_generation_config(gc) if gc else None
+        if vals:
+            return {
+                **vals,
+                "source":    "generation_config",
+                "from_repo": rid,
+                "raw":       gc,
+            }
+    return None
 
 
 def group_gguf_files(repo_files: list[dict]) -> dict:
@@ -273,6 +341,7 @@ def stream_download(plan: dict) -> Iterator[dict]:
         {"type": "progress",   "rel", "downloaded", "total", "speed"}
         {"type": "file_done",  "rel", "dest"}
         {"type": "file_skip",  "rel", "dest", "reason"}
+        {"type": "sampling",   "found", "source", "from_repo", "values"}
         {"type": "error",      "rel", "message"}
         {"type": "done"}
     """
@@ -346,4 +415,25 @@ def stream_download(plan: dict) -> Iterator[dict]:
                     break
         except Exception as e:
             yield {"type": "error", "rel": rel, "message": str(e)}
+
+    # Sidecar de sampling: puxa o generation_config.json do repo (ou do base_model)
+    # e grava sampling.json ao lado do .gguf. É o que faz um modelo recém-baixado
+    # já subir com os samplers do autor em vez de um preset genérico. Best-effort:
+    # rede caindo aqui não pode invalidar um download que terminou.
+    try:
+        vals = fetch_generation_config(plan["repo_id"], plan.get("branch", "main"))
+        if vals:
+            sampling.write_sidecar(Path(plan["base_dir"]), vals)
+            yield {
+                "type":      "sampling",
+                "found":     True,
+                "source":    vals["source"],
+                "from_repo": vals.get("from_repo"),
+                "values":    {k: vals[k] for k in sampling.SAMPLER_KEYS if k in vals},
+            }
+        else:
+            yield {"type": "sampling", "found": False}
+    except Exception as e:
+        yield {"type": "sampling", "found": False, "error": str(e)}
+
     yield {"type": "done"}

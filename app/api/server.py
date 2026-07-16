@@ -58,6 +58,7 @@ from api.core import (  # noqa: E402
     builder as builder_mod,
     config_store,
     constants,
+    defaults,
     estimator,
     gguf,
     hf,
@@ -68,6 +69,7 @@ from api.core import (  # noqa: E402
     nvidia,
     runner,
     running,
+    sampling,
     settings_store,
 )
 
@@ -112,6 +114,15 @@ class LaunchConfig(BaseModel):
     spec_draft_n_max: int = 2
     mmproj: str | None = None
     verbose: bool = False
+    # Samplers. None = resolvido por modelo (generation_config do autor > preset do
+    # chat template). sampler_source == "manual" trava os valores abaixo: é o usuário
+    # mandando, e nada os sobrescreve.
+    temp: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    repeat_penalty: float | None = None
+    sampler_source: str | None = None
     # Multi-GPU (opcionais; None = default do llama.cpp = layer split entre todas)
     split_mode: str | None = None      # "none" | "layer" | "row"
     tensor_split: str | None = None    # ex.: "1,1" (meio a meio entre 2 GPUs)
@@ -165,6 +176,7 @@ def get_options():
         "spec_draft_n_max": constants.SPEC_DRAFT_N_MAX_OPTIONS,
         "cpu_threads_gen":   constants.CPU_THREADS_GEN,
         "cpu_threads_batch": constants.CPU_THREADS_BATCH,
+        "sampler_presets":   sampling.PRESETS,
     }
 
 
@@ -229,6 +241,41 @@ def model_meta(req: MetaRequest):
     if meta is None:
         raise HTTPException(404, "GGUF metadata não pôde ser lido")
     return meta
+
+
+class DefaultsRequest(BaseModel):
+    model: str
+    backend: str = "vanilla"
+    mode: str = "server"
+
+
+@app.post("/api/models/defaults")
+def model_defaults(req: DefaultsRequest):
+    """Config recomendada pro modelo: o que o botão "defaults do modelo" preenche.
+
+    Deriva tudo que dá pra derivar (GGUF + VRAM + samplers do autor) e devolve as
+    notas explicando cada escolha — palpite sem justificativa não é configurável.
+    """
+    try:
+        return defaults.suggest_config(Path(req.model), req.backend, req.mode)
+    except Exception as e:
+        raise HTTPException(400, f"não consegui derivar defaults: {e}")
+
+
+class SamplingRequest(BaseModel):
+    model: str
+    config: dict | None = None
+
+
+@app.post("/api/models/sampling")
+def model_sampling(req: SamplingRequest):
+    """Samplers que este modelo receberia agora, e de onde vieram.
+
+    `source` é o ponto todo: "generation_config" = números do autor; "template" =
+    preset derivado do chat template; "default" = chute; "manual" = o usuário fixou.
+    A UI mostra isso pra um preset genérico nunca passar por recomendação oficial.
+    """
+    return sampling.resolve(Path(req.model), req.config)
 
 
 # ─── routes: configs ──────────────────────────────────────────────────────────

@@ -160,6 +160,7 @@ def read_meta(model_path: Path) -> dict | None:
         v = raw.get(f"{arch}.{name}")
         return default if v is None else v
 
+    n_ctx_train = g("context_length")
     n_layer = g("block_count")
     n_embd  = g("embedding_length")
     n_head  = g("attention.head_count")
@@ -203,6 +204,14 @@ def read_meta(model_path: Path) -> dict | None:
         moe_per_layer_mib = int(avg_bytes / _MIB)
 
     chat_template = raw.get("tokenizer.chat_template") or ""
+    tpl_lower     = chat_template.lower()
+    # Fonte de verdade pra "o modelo pensa": o próprio template. Um modelo de
+    # raciocínio precisa abrir a resposta com <think> (ou expor enable_thinking /
+    # reasoning_content), então isso está sempre no template — enquanto o nome do
+    # arquivo não diz nada (ornith-1.0-35b não tem nenhuma palavra reveladora).
+    has_thinking = any(
+        kw in tpl_lower for kw in ("<think>", "enable_thinking", "reasoning_content")
+    )
 
     token_embd_mib  = int(token_embd_bytes  / _MIB)
     output_mib      = int(output_bytes      / _MIB)
@@ -211,6 +220,8 @@ def read_meta(model_path: Path) -> dict | None:
 
     meta = {
         "arch":              arch,
+        # Contexto de treino: teto acima do qual sugerir ctx é pedir degradação.
+        "n_ctx_train":       int(n_ctx_train) if n_ctx_train else None,
         "n_layer":           int(n_layer),
         "n_embd":            int(n_embd),
         "n_head":            int(n_head),
@@ -233,6 +244,7 @@ def read_meta(model_path: Path) -> dict | None:
         "attn_layers":       sorted(attn_layer_set),
         "ssm_state_per_layer_mib": ssm_state_per_layer_mib,
         "supports_preserve_thinking": "preserve_thinking" in chat_template,
+        "has_thinking_template":      has_thinking,
     }
     _GGUF_META_CACHE[key] = meta
     return meta

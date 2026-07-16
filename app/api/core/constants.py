@@ -121,14 +121,21 @@ CONTEXT_OPTIONS = [
     {"value": 262_144, "label": "262 144 tokens (256k)"},
 ]
 
+# Amostra pequena (Qwen3.6-27B, 2026-07-14, UMA execução por cenário — indicativo, não
+# distribuição): turno agêntico gastou 37 e 119 tokens de thinking; matemática e
+# arquitetura pesadas, 4106 e 3994. Duas leituras: (a) num agente o teto praticamente
+# não é alcançado; (b) 4096 fica em cima da faixa das tarefas difíceis.
+# A proteção contra o loop infinito vem de o budget ser FINITO. Apertar mais reduz o
+# CUSTO de um runaway (metade dos tokens até o corte), não o risco dele — por isso 4096
+# continua útil quando latência importa mais que raciocínio profundo.
 REASONING_BUDGET_OPTIONS = [
-    {"value": 0,       "label": "0 — Desabilitar thinking (--reasoning off)"},
+    {"value": 0,       "label": "0 — Não abre <think> (o app emite --reasoning off) — último recurso p/ stall"},
     {"value": 1_024,   "label": "1 024 — Rápido"},
     {"value": 2_048,   "label": "2 048"},
-    {"value": 4_096,   "label": "4 096 [recomendado — agentes de código]"},
-    {"value": 8_192,   "label": "8 192 — Problemas complexos"},
-    {"value": 16_384,  "label": "16 384 — Máxima qualidade de raciocínio"},
-    {"value": -1,      "label": "-1 — Sem limite"},
+    {"value": 4_096,   "label": "4 096 — corta runaway mais cedo; pode truncar raciocínio pesado"},
+    {"value": 8_192,   "label": "8 192 [recomendado — ~2x o maior thinking observado na amostra]"},
+    {"value": 16_384,  "label": "16 384 — exige max-tokens maior (o thinking come o espaço da resposta)"},
+    {"value": -1,      "label": "-1 — Sem limite (já TRAVOU em loop agêntico em arch qwen35/SSM)"},
 ]
 
 PARALLEL_OPTIONS = [

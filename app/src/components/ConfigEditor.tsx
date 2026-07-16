@@ -1,8 +1,9 @@
-import { Rocket } from "lucide-react";
+import { Rocket, Wand2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type {
-  BackendStatus, Estimate, GgufMeta, LaunchConfig, ModelInfo, Options,
+  BackendStatus, Estimate, GgufMeta, LaunchConfig, ModelInfo, ModelSampling,
+  Options, Sampler, SamplerSource,
 } from "../api/types";
 import { modelAliasFromPath } from "../util/format";
 import { EstimatePanel } from "./EstimatePanel";
@@ -41,6 +42,12 @@ const DEFAULT_CFG: LaunchConfig = {
   spec_draft_n_max: 2,
   mmproj: null,
   verbose: false,
+  temp: null,
+  top_p: null,
+  top_k: null,
+  min_p: null,
+  repeat_penalty: null,
+  sampler_source: null,
   split_mode: null,
   tensor_split: null,
   main_gpu: null,
@@ -52,11 +59,14 @@ export function ConfigEditor({
 }: Props) {
   const [cfg, setCfg] = useState<LaunchConfig>(DEFAULT_CFG);
   const [meta, setMeta] = useState<GgufMeta | null>(null);
+  const [sampling, setSampling] = useState<ModelSampling | null>(null);
   const [estimate, setEstimate] = useState<Estimate | null>(null);
   const [estimating, setEstimating] = useState(false);
   const [command, setCommand] = useState<string>("");
   const [saving, setSaving] = useState(false);
   const [gpuCount, setGpuCount] = useState(0);
+  const [applyingDefaults, setApplyingDefaults] = useState(false);
+  const [defaultsNotes, setDefaultsNotes] = useState<string[]>([]);
 
   // Quantas GPUs há — decide se mostramos os controles de split multi-GPU.
   useEffect(() => {
@@ -84,11 +94,28 @@ export function ConfigEditor({
       return;
     }
     let cancelled = false;
+    setDefaultsNotes([]);   // notas são do modelo anterior
     api.modelMeta(cfg.model)
       .then((m) => !cancelled && setMeta(m))
       .catch(() => !cancelled && setMeta(null));
     return () => { cancelled = true; };
   }, [cfg.model]);
+
+  // Samplers que o backend resolveria pra este modelo (e a procedência). Só
+  // re-consulta ao trocar de modelo ou ao voltar pro automático — enquanto o
+  // usuário edita (sampler_source = "manual") quem manda é a config.
+  useEffect(() => {
+    if (!cfg.model) {
+      setSampling(null);
+      return;
+    }
+    if (cfg.sampler_source === "manual") return;
+    let cancelled = false;
+    api.modelSampling(cfg.model)
+      .then((s) => !cancelled && setSampling(s))
+      .catch(() => !cancelled && setSampling(null));
+    return () => { cancelled = true; };
+  }, [cfg.model, cfg.sampler_source]);
 
   // Estimativa debounced — recalcula em qualquer mudança relevante
   const estimateRef = useRef<number | null>(null);
@@ -152,13 +179,54 @@ export function ConfigEditor({
     [cfg.model],
   );
   const backend = backends.find((b) => b.name === cfg.backend);
-  const isThinkingModel = useMemo(() => {
-    const lower = cfg.model.toLowerCase();
-    return ["qwen3", "qwq", "deepseek-r1", "thinking", "reasoning", "gemma-4", "gemma4"].some((k) => lower.includes(k));
-  }, [cfg.model]);
 
   const modelInfo = models.find((m) => m.path === cfg.model);
   const hasMmproj = !!modelInfo?.mmproj;
+  // Chat template do GGUF, não palpite pelo nome do arquivo: um modelo de
+  // raciocínio com nome fora do padrão (ornith, glm…) passava batido e perdia
+  // tanto o reasoning-budget quanto o preset de sampling certo.
+  const isThinkingModel = meta?.has_thinking_template ?? modelInfo?.is_thinking ?? false;
+
+  // Valores efetivos: o que o usuário fixou, senão o que o backend resolveu.
+  const eff: Sampler | null = useMemo(() => {
+    if (!sampling) return null;
+    return {
+      temp:           cfg.temp           ?? sampling.temp,
+      top_p:          cfg.top_p          ?? sampling.top_p,
+      top_k:          cfg.top_k          ?? sampling.top_k,
+      min_p:          cfg.min_p          ?? sampling.min_p,
+      repeat_penalty: cfg.repeat_penalty ?? sampling.repeat_penalty,
+    };
+  }, [sampling, cfg.temp, cfg.top_p, cfg.top_k, cfg.min_p, cfg.repeat_penalty]);
+
+  // Primeira edição materializa os cinco valores e trava em "manual" — evita que
+  // metade fique fixa e metade continue seguindo o automático.
+  const editSampler = (key: keyof Sampler, value: number) => {
+    if (!eff) return;
+    setCfg((c) => ({ ...c, ...eff, [key]: value, sampler_source: "manual" }));
+  };
+
+  const resetSampler = () =>
+    setCfg((c) => ({
+      ...c, temp: null, top_p: null, top_k: null, min_p: null,
+      repeat_penalty: null, sampler_source: null,
+    }));
+
+  // Preenche a config inteira com o que dá pra derivar do modelo + da máquina.
+  // Preserva só o que é escolha do usuário e não do modelo: backend e modo.
+  const applyDefaults = async () => {
+    if (!cfg.model) return;
+    setApplyingDefaults(true);
+    try {
+      const d = await api.modelDefaults(cfg.model, cfg.backend, cfg.mode ?? "server");
+      setCfg((c) => ({ ...d.config, id: c.id, backend: c.backend, mode: c.mode }));
+      setDefaultsNotes(d.notes);
+    } catch (err) {
+      setDefaultsNotes([`falhou: ${(err as Error).message}`]);
+    } finally {
+      setApplyingDefaults(false);
+    }
+  };
 
   const handleSave = async (then?: "launch" | "close") => {
     if (!cfg.model) return;
@@ -240,6 +308,30 @@ export function ConfigEditor({
                 ))}
               </select>
             </Field>
+
+            {cfg.model && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={applyDefaults}
+                    disabled={applyingDefaults}
+                    className="text-xs px-2.5 py-1.5 rounded bg-accent/20 border border-accent/50 hover:bg-accent/30 text-accent flex items-center gap-1.5 disabled:opacity-50"
+                    title="Deriva contexto, -ngl, -ncmoe, KV, reasoning e samplers do GGUF + VRAM da máquina"
+                  >
+                    <Wand2 className="w-3.5 h-3.5" />
+                    {applyingDefaults ? "calculando…" : "defaults do modelo"}
+                  </button>
+                  <span className="text-[11px] text-ink-500">
+                    preenche tudo a partir do GGUF e da VRAM (mantém backend e modo)
+                  </span>
+                </div>
+                {defaultsNotes.length > 0 && (
+                  <ul className="text-[11px] text-ink-400 space-y-1 border-l-2 border-accent/40 pl-2">
+                    {defaultsNotes.map((n, i) => <li key={i}>{n}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
 
             <Field label="Backend">
               <div className="flex gap-2">
@@ -516,6 +608,68 @@ export function ConfigEditor({
             </Section>
           )}
 
+          <Section title="Sampling">
+            {eff && sampling ? (
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <SamplerSourceBadge
+                    source={cfg.sampler_source === "manual" ? "manual" : sampling.source}
+                    fromRepo={sampling.from_repo}
+                    thinking={sampling.thinking}
+                  />
+                  {cfg.sampler_source === "manual" && (
+                    <button
+                      onClick={resetSampler}
+                      className="text-xs px-2 py-1 rounded bg-ink-800 hover:bg-ink-700 shrink-0"
+                      title="Voltar a resolver automaticamente por modelo"
+                    >
+                      voltar ao automático
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-5 gap-2">
+                  <Field label="temp">
+                    <input
+                      type="number" step={0.05} min={0} className={inputCls}
+                      value={eff.temp}
+                      onChange={(e) => editSampler("temp", Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="top-p">
+                    <input
+                      type="number" step={0.05} min={0} max={1} className={inputCls}
+                      value={eff.top_p}
+                      onChange={(e) => editSampler("top_p", Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="top-k">
+                    <input
+                      type="number" step={1} min={0} className={inputCls}
+                      value={eff.top_k}
+                      onChange={(e) => editSampler("top_k", Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="min-p">
+                    <input
+                      type="number" step={0.01} min={0} max={1} className={inputCls}
+                      value={eff.min_p}
+                      onChange={(e) => editSampler("min_p", Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="repeat">
+                    <input
+                      type="number" step={0.01} min={1} className={inputCls}
+                      value={eff.repeat_penalty}
+                      onChange={(e) => editSampler("repeat_penalty", Number(e.target.value))}
+                    />
+                  </Field>
+                </div>
+              </>
+            ) : (
+              <div className="text-xs text-ink-500">selecione um modelo</div>
+            )}
+          </Section>
+
           <Section title="Generation & misc">
             <div className="grid grid-cols-2 gap-3">
               <Field label="max-tokens (-n)">
@@ -632,6 +786,40 @@ export function ConfigEditor({
 
 const inputCls  = "bg-ink-950 border border-ink-700 rounded px-2 py-1.5 text-sm w-full focus:outline-none focus:border-accent";
 const selectCls = "bg-ink-950 border border-ink-700 rounded px-2 py-1.5 text-sm w-full focus:outline-none focus:border-accent";
+
+// De onde vieram os samplers. O ponto de existir isto: "template" e "default" são
+// derivação NOSSA, não recomendação do autor — e o usuário tem que conseguir ver a
+// diferença antes de culpar o modelo por um resultado ruim.
+function SamplerSourceBadge({ source, fromRepo, thinking }: {
+  source: SamplerSource; fromRepo?: string | null; thinking: boolean;
+}) {
+  const cls = {
+    generation_config: "bg-emerald-900/40 text-emerald-300 border-emerald-700/50",
+    template:          "bg-sky-900/40 text-sky-300 border-sky-700/50",
+    default:           "bg-amber-900/40 text-amber-300 border-amber-700/50",
+    manual:            "bg-ink-800 text-ink-300 border-ink-600",
+  }[source];
+  const label = {
+    generation_config: "valores do autor",
+    template:          `preset ${thinking ? "reasoning" : "código"}`,
+    default:           "chute (GGUF ilegível)",
+    manual:            "fixado por você",
+  }[source];
+  const why = {
+    generation_config: `generation_config.json de ${fromRepo ?? "o repo do modelo"}`,
+    template: thinking
+      ? "chat template tem <think> → preset de raciocínio (temp mais alta, sem penalidade)"
+      : "chat template sem <think> → preset de código validado em A/B",
+    default: "não deu pra ler o GGUF — preset conservador, confira o card do modelo",
+    manual:  "seus valores; nada sobrescreve",
+  }[source];
+  return (
+    <div className={`text-[11px] border rounded px-2 py-1 leading-tight ${cls}`} title={why}>
+      <span className="font-medium">{label}</span>
+      <span className="opacity-70"> · {why}</span>
+    </div>
+  );
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (

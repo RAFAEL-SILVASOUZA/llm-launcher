@@ -279,6 +279,21 @@ Baixa modelos direto do HuggingFace:
 2. **HuggingFace download** — cole a URL (`https://huggingface.co/dono/repo`) ou o id (`dono/repo`) e clique **inspecionar**: a APP lista os arquivos GGUF do repositório agrupados por quantização para você escolher qual baixar. Ou use o campo de **busca** (ex.: `qwen 30b moe coder`) para pesquisar repositórios GGUF no HF.
 3. Durante o download: barra de progresso por arquivo com velocidade, suporte a modelos multi-shard, botão de cancelar. Pode **trocar de aba sem medo** — o download continua no backend e a aba Download mostra um spinner enquanto estiver ativo.
 4. Ao final, a integridade é validada e a lista de modelos recarrega sozinha.
+5. A APP busca o **`generation_config.json`** do repo (ou do `base_model`, quando é repo de quant) e grava um **`sampling.json`** ao lado do modelo — são os samplers que o *autor* publicou. Se o repo não publicar nenhum, a tela avisa.
+
+#### Samplers por modelo
+
+Temperatura, top-p, top-k, min-p e repeat-penalty **não são um preset único** — são resolvidos por modelo, e a APP mostra **de onde vieram**:
+
+| Procedência | Significado |
+|---|---|
+| `valores do autor` | vieram do `generation_config.json` do repo (via `sampling.json`) |
+| `preset reasoning` | o chat template do GGUF tem `<think>` → temp 0.6 / top-p 0.95, sem penalidade |
+| `preset código` | template sem `<think>` → temp 0.3 / top-p 0.8 / repeat 1.05 (validado em A/B para agente de código) |
+| `chute` | o GGUF não pôde ser lido — confira o card do modelo |
+| `fixado por você` | você editou na seção **Sampling** do editor; nada sobrescreve |
+
+Por que isso importa: em modelo de raciocínio, temperatura baixa e repeat-penalty **aumentam** o loop dentro do `<think>` e punem a repetição legítima de fórmula/identificador. Quem pensa e quem não pensa precisam de presets diferentes — e a detecção sai do **chat template**, nunca do nome do arquivo (`ornith-1.0-35b` é reasoning e não tem nenhuma palavra reveladora no nome).
 
 #### Aba MCP
 

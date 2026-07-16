@@ -19,6 +19,26 @@ export type Options = {
   spec_draft_n_max: Option<number>[];
   cpu_threads_gen: number;
   cpu_threads_batch: number;
+  sampler_presets: Record<"code" | "reasoning", Sampler>;
+};
+
+// ─── sampling ──────────────────────────────────────────────────────────────
+// De onde vieram os samplers, em ordem de confiança. A UI mostra isto porque
+// "default" e "template" são derivação nossa, não recomendação do autor.
+export type SamplerSource = "generation_config" | "template" | "default" | "manual";
+
+export type Sampler = {
+  temp: number;
+  top_p: number;
+  top_k: number;
+  min_p: number;
+  repeat_penalty: number;
+};
+
+export type ModelSampling = Sampler & {
+  source: SamplerSource;
+  thinking: boolean;
+  from_repo?: string | null;
 };
 
 export type BackendStatus = {
@@ -53,6 +73,7 @@ export type ModelInfo = {
   size_mib: number;
   is_thinking: boolean;
   is_mtp: boolean;
+  sampling: ModelSampling;
 };
 
 export type GgufMeta = {
@@ -79,6 +100,8 @@ export type GgufMeta = {
   attn_layers: number[];
   ssm_state_per_layer_mib: number;
   supports_preserve_thinking: boolean;
+  // Vem do chat template, não do nome do arquivo — é a detecção confiável.
+  has_thinking_template: boolean;
 };
 
 export type LaunchConfig = {
@@ -104,11 +127,27 @@ export type LaunchConfig = {
   spec_draft_n_max: number;
   mmproj: string | null;
   verbose: boolean;
+  // Samplers. null = resolvido por modelo no backend. sampler_source "manual"
+  // trava os valores: o usuário editou e nada os sobrescreve.
+  temp?: number | null;
+  top_p?: number | null;
+  top_k?: number | null;
+  min_p?: number | null;
+  repeat_penalty?: number | null;
+  sampler_source?: SamplerSource | null;
   // Multi-GPU (opcionais; null/undefined = default do llama.cpp = layer split)
   split_mode?: "none" | "layer" | "row" | null;
   tensor_split?: string | null;
   main_gpu?: number | null;
   mode?: "server" | "cli";
+};
+
+// Config recomendada pro modelo (botão "defaults do modelo"). `notes` explica cada
+// escolha não-óbvia — o usuário precisa poder discordar do palpite com base.
+export type ModelDefaults = {
+  config: LaunchConfig;
+  notes: string[];
+  sampling: ModelSampling;
 };
 
 export type Estimate = {
@@ -209,6 +248,14 @@ export type HfDownloadEvent =
   | { type: "progress"; rel: string; downloaded: number; total: number; speed: number }
   | { type: "file_done"; rel: string; dest: string }
   | { type: "file_skip"; rel: string; dest: string; reason: string; size: number }
+  | {
+      type: "sampling";
+      found: boolean;
+      source?: SamplerSource;
+      from_repo?: string | null;
+      values?: Partial<Sampler>;
+      error?: string;
+    }
   | { type: "error"; rel: string; message: string }
   | { type: "cancelled" }
   | { type: "done" };

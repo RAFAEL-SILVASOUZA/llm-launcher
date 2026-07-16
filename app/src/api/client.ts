@@ -21,7 +21,9 @@ import type {
   LmsStatus,
   McpServer,
   McpStatus,
+  ModelDefaults,
   ModelInfo,
+  ModelSampling,
   NvidiaStatus,
   Options,
   RouterLaunchConfig,
@@ -83,6 +85,18 @@ export const api = {
     jsonFetch<GgufMeta>("/api/models/meta", {
       method: "POST",
       body: JSON.stringify({ model }),
+    }),
+  // Samplers que o modelo receberia agora + a procedência deles.
+  modelSampling: (model: string, config?: LaunchConfig) =>
+    jsonFetch<ModelSampling>("/api/models/sampling", {
+      method: "POST",
+      body: JSON.stringify({ model, config: config ?? null }),
+    }),
+  // Config inteira derivada do modelo + VRAM da máquina.
+  modelDefaults: (model: string, backend: string, mode = "server") =>
+    jsonFetch<ModelDefaults>("/api/models/defaults", {
+      method: "POST",
+      body: JSON.stringify({ model, backend, mode }),
     }),
 
   listConfigs: () => jsonFetch<LaunchConfig[]>("/api/configs"),

@@ -93,6 +93,18 @@ def backend_supports_chat_template_kwargs(backend: str, mode: str = "server") ->
     return "--chat-template-kwargs" in help_text
 
 
+def backend_supports_flag(flag: str, backend: str, mode: str = "server") -> bool:
+    """Se o binário aceita `flag` (parse do --help, cacheado).
+
+    Sem probe assume que sim: o auto-degrade remove a flag se o server recusar.
+    Builds antigos do turboquant não têm --reasoning-budget-message, por exemplo.
+    """
+    help_text = backend_help_text(backend, mode)
+    if not help_text:
+        return True
+    return flag in help_text
+
+
 def probe_kv_types(backend: str, mode: str = "server") -> set[str]:
     """Lê os tipos de --cache-type-k aceitos via parse do --help. Cacheado."""
     cache_key = (backend, mode)

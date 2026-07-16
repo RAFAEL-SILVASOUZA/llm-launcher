@@ -2,8 +2,10 @@
 import sys
 from pathlib import Path
 
-from .backends import backend_binary
+from . import sampling
+from .backends import backend_binary, backend_supports_flag
 from .constants import BACKENDS, CPU_THREADS_BATCH, CPU_THREADS_GEN
+from .defaults import REASONING_BUDGET_MESSAGE
 from .models_repo import is_mtp_model, make_alias
 
 
@@ -64,6 +66,7 @@ def build_server_command(
     main_gpu:         int | None = None,
     host:             str = "0.0.0.0",
     port:             int = 1234,
+    sampler:          dict | None = None,
 ) -> str:
     alias = make_alias(model_path)
     server_bin = backend_binary(backend, "server")
@@ -87,22 +90,16 @@ def build_server_command(
     cmd += f' -np {parallel_slots}'
     cmd += f' -n {max_tokens}'
 
-    # Rede de segurança anti-loop (DEFAULTS do servidor; request pode sobrescrever).
-    # Sem isto, cliente com temperature=0 e sem penalidade entra em loop até
-    # estourar o contexto. DRY pune só repetição literal, mas precisa de janela
-    # limitada: sobre o contexto inteiro (default -1) passa a punir o próprio
-    # estilo do modelo em sessão longa e induz EOS precoce a partir de ~8k tokens
-    # de saída acumulada (A/B multi-turno 2026-06-11). Pelo mesmo motivo não usar
-    # presence-penalty como default — taxa todo token já visto, sem janela.
-    # DRY REMOVIDO: a premissa "pune só repetição literal, não machuca código" é FALSA.
-    # Com --dry-allowed-length 4 ele pune a repetição LEGÍTIMA de código (ex.:
-    # `this.getUser('1'), this.getUser('2')`), forçando o modelo a desviar e corromper o
-    # texto — dropar caractere ("thisgetUser"), trocar dígito ('2'->'3'), trocar aspas.
-    # Quebra applyPatch/edição exata; comprovado empiricamente (2026-06-17): mesmo prompt
-    # acerta de primeira sem DRY. Anti-loop agora via sampling saudável + repeat-penalty
-    # LEVE (1.05), que não corrompe reprodução exata.
-    cmd += ' --temp 0.3 --top-p 0.8 --top-k 20'
-    cmd += ' --repeat-penalty 1.05'
+    # Samplers: DEFAULTS do servidor (o request do client ainda sobrescreve).
+    # Resolvidos POR MODELO em sampling.py — preset de código pra não-thinking,
+    # preset do card pra reasoning, ou os números do próprio autor quando o
+    # generation_config.json veio junto no download.
+    # DRY continua fora: com --dry-allowed-length 4 ele pune a repetição LEGÍTIMA de
+    # código (`this.getUser('1'), this.getUser('2')`), forçando o modelo a desviar e
+    # corromper o texto — dropar caractere, trocar dígito/aspas — o que quebra
+    # applyPatch/edição exata (comprovado 2026-06-17). Presence-penalty idem: taxa
+    # todo token já visto, sem janela, e induz EOS precoce em sessão longa (2026-06-11).
+    cmd += sampling.cli_flags(sampler or sampling.resolve(model_path))
     # Não descarta tokens antigos em silêncio (perde system prompt + tools) quando
     # o contexto enche — devolve erro limpo pro agente compactar e retentar.
     cmd += ' --no-context-shift'
@@ -116,6 +113,14 @@ def build_server_command(
             # nos que já pensam por padrão (Qwen3) é redundante mas inofensivo.
             cmd += ' --reasoning on'
             cmd += f' --reasoning-budget {reasoning_budget}'
+            # Budget estourado sem esta mensagem = o <think> é cortado no meio e o
+            # modelo pode não se recuperar. A mensagem é injetada antes do
+            # </think> forçado e devolve o modelo pra "responde ou chama a tool" —
+            # é o que quebra o loop agêntico do híbrido SSM.
+            if reasoning_budget > 0 and backend_supports_flag(
+                "--reasoning-budget-message", backend, "server"
+            ):
+                cmd += f' --reasoning-budget-message "{REASONING_BUDGET_MESSAGE}"'
 
     if preserve_thinking:
         cmd += ' --chat-template-kwargs "{\\"preserve_thinking\\": true}"'
@@ -156,6 +161,7 @@ def build_cli_command(
     split_mode:       str | None = None,
     tensor_split:     str | None = None,
     main_gpu:         int | None = None,
+    sampler:          dict | None = None,
 ) -> str:
     cli_bin = backend_binary(backend, "cli")
     if not cli_bin.exists():
@@ -176,14 +182,9 @@ def build_cli_command(
     cmd += f' -t {threads_gen} -tb {threads_batch}'
     cmd += f' -n {max_tokens}'
 
-    # Rede de segurança anti-loop (ver build_server_command). Sem --no-context-shift
-    # no CLI: numa conversa de terminal o shift é melhor que morrer com erro.
-    # DRY REMOVIDO (ver build_server_command): com --dry-allowed-length 4 ele pune a
-    # repetição LEGÍTIMA de código e corrompe a reprodução exata (dropa caractere, troca
-    # dígito/aspas), quebrando applyPatch. Comprovado 2026-06-17. Anti-loop agora via
-    # sampling saudável + repeat-penalty LEVE (1.05).
-    cmd += ' --temp 0.3 --top-p 0.8 --top-k 20'
-    cmd += ' --repeat-penalty 1.05'
+    # Samplers por modelo (ver build_server_command). Sem --no-context-shift no CLI:
+    # numa conversa de terminal o shift é melhor que morrer com erro.
+    cmd += sampling.cli_flags(sampler or sampling.resolve(model_path))
 
     if reasoning_budget is not None:
         if reasoning_budget == 0:
@@ -260,11 +261,9 @@ def _router_section_lines(cfg: dict) -> list[str]:
     add("parallel", parallel)
     add("n-predict", cfg.get("max_tokens", 8_192))
 
-    # Rede de segurança anti-loop — mesma justificativa do build_server_command.
-    add("temp", 0.3)
-    add("top-p", 0.8)
-    add("top-k", 20)
-    add("repeat-penalty", 1.05)
+    # Samplers por modelo — mesma resolução do build_server_command.
+    for key, val in sampling.ini_pairs(sampling.resolve(model_path, cfg)):
+        add(key, val)
     add("no-context-shift", "true")
 
     reasoning_budget = cfg.get("reasoning_budget")
@@ -274,6 +273,11 @@ def _router_section_lines(cfg: dict) -> list[str]:
         else:
             add("reasoning", "on")
             add("reasoning-budget", reasoning_budget)
+            if reasoning_budget > 0 and backend_supports_flag(
+                "--reasoning-budget-message", cfg.get("backend", "turbo"), "server"
+            ):
+                # Valor INI é a linha crua — sem aspas de shell.
+                add("reasoning-budget-message", REASONING_BUDGET_MESSAGE)
 
     if cfg.get("preserve_thinking", False):
         # Valor INI é a linha crua — sem escaping de shell.
@@ -364,6 +368,7 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
     mmproj_str = cfg.get("mmproj")
     mmproj = Path(mmproj_str) if mmproj_str else None
     model_path = Path(cfg["model"])
+    sampler = sampling.resolve(model_path, cfg)
     if mode == "server":
         return build_server_command(
             model_path=model_path,
@@ -390,6 +395,7 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
             split_mode=cfg.get("split_mode"),
             tensor_split=cfg.get("tensor_split"),
             main_gpu=cfg.get("main_gpu"),
+            sampler=sampler,
         )
     return build_cli_command(
         model_path=model_path,
@@ -412,4 +418,5 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
         split_mode=cfg.get("split_mode"),
         tensor_split=cfg.get("tensor_split"),
         main_gpu=cfg.get("main_gpu"),
+        sampler=sampler,
     )

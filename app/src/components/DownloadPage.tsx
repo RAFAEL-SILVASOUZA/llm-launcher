@@ -458,6 +458,36 @@ export function DownloadPage({
               <CheckCircle className="w-4 h-4" /> concluído. Os modelos já aparecem na lista.
             </div>
           )}
+
+          {/* Samplers do autor (generation_config.json). Achou = o modelo já sobe
+              configurado como o autor publicou; não achou = a config vai sair de um
+              preset nosso, e é melhor o usuário saber disso agora que depois. */}
+          {events.map((e, i) => (e.type === "sampling" ? (
+            <div
+              key={i}
+              className={`text-xs flex items-start gap-1 ${e.found ? "text-emerald-400" : "text-amber-400"}`}
+            >
+              {e.found ? <CheckCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                       : <XCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />}
+              <span>
+                {e.found ? (
+                  <>
+                    samplers do autor gravados (<span className="mono">sampling.json</span>) via{" "}
+                    <span className="mono">{e.from_repo}</span>:{" "}
+                    <span className="mono">
+                      {Object.entries(e.values ?? {}).map(([k, v]) => `${k}=${v}`).join(" · ")}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    o repo não publica <span className="mono">generation_config.json</span> — o modelo
+                    vai usar o preset derivado do chat template. Confira o card se o resultado
+                    parecer estranho.
+                  </>
+                )}
+              </span>
+            </div>
+          ) : null))}
         </section>
       )}
     </div>

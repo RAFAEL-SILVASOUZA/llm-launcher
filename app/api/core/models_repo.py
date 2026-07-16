@@ -7,6 +7,7 @@ make_alias, is_thinking_model, is_mtp_model, _SPLIT_RE).
 import re
 from pathlib import Path
 
+from . import gguf, sampling
 from .constants import MODELS_DIR, THINKING_KEYWORDS
 
 SPLIT_RE = re.compile(
@@ -63,6 +64,16 @@ def make_alias(model_path: Path) -> str:
 
 
 def is_thinking_model(model_path: Path) -> bool:
+    """Decide pelo chat template do GGUF; keywords no nome são só o fallback.
+
+    A lista de keywords era a detecção principal e errava calado em todo modelo
+    com nome fora do padrão (ornith, glm, minimax…): o modelo pensava, o app o
+    tratava como não-thinking, escondia o reasoning-budget e servia o preset de
+    sampling errado. Só cai no nome quando o GGUF não pôde ser lido.
+    """
+    meta = gguf.read_meta(model_path)
+    if meta is not None:
+        return bool(meta.get("has_thinking_template"))
     name = model_path.name.lower()
     return any(kw in name for kw in THINKING_KEYWORDS)
 
@@ -206,4 +217,5 @@ def describe_model(model_path: Path, models_dir: Path | list[Path] = MODELS_DIR)
         "size_mib":       model_disk_size_mib(model_path),
         "is_thinking":    is_thinking_model(model_path),
         "is_mtp":         is_mtp_model(model_path),
+        "sampling":       sampling.resolve(model_path),
     }
