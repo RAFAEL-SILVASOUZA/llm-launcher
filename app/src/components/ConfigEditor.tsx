@@ -91,15 +91,25 @@ export function ConfigEditor({
   useEffect(() => {
     if (!cfg.model) {
       setMeta(null);
+      setContextOptions(null);
       return;
     }
     let cancelled = false;
     setDefaultsNotes([]);   // notas são do modelo anterior
-    api.modelMeta(cfg.model)
-      .then((m) => !cancelled && setMeta(m))
-      .catch(() => !cancelled && setMeta(null));
+    Promise.all([
+      api.modelMeta(cfg.model)
+        .then((m) => !cancelled && setMeta(m))
+        .catch(() => !cancelled && setMeta(null)),
+      api.modelContextOptions(cfg.model)
+        .then((r) => !cancelled && setContextOptions(r.options))
+        .catch(() => !cancelled && setContextOptions(null)),
+    ]);
     return () => { cancelled = true; };
   }, [cfg.model]);
+
+  const [contextOptions, setContextOptions] = useState<
+    { value: number; label: string }[] | null
+  >(null);
 
   // Samplers que o backend resolveria pra este modelo (e a procedência). Só
   // re-consulta ao trocar de modelo ou ao voltar pro automático — enquanto o
@@ -385,12 +395,21 @@ export function ConfigEditor({
           <Section title="Contexto & KV">
             <div className="grid grid-cols-2 gap-3">
               <Field label="Context window (pool -kvu)">
-                <SelectFromOptions
-                  options={options.context_window}
-                  value={cfg.context_window}
-                  onChange={(v) => setCfg((c) => ({ ...c, context_window: v as number }))}
-                  allowCustom
-                />
+                {contextOptions ? (
+                  <SelectFromOptions
+                    options={contextOptions}
+                    value={cfg.context_window}
+                    onChange={(v) => setCfg((c) => ({ ...c, context_window: v as number }))}
+                    allowCustom
+                  />
+                ) : (
+                  <SelectFromOptions
+                    options={options.context_window}
+                    value={cfg.context_window}
+                    onChange={(v) => setCfg((c) => ({ ...c, context_window: v as number }))}
+                    allowCustom
+                  />
+                )}
               </Field>
               <Field label="Slots paralelos (-np)">
                 <SelectFromOptions

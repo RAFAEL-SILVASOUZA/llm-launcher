@@ -86,6 +86,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ model }),
     }),
+  modelContextOptions: (model: string) =>
+    jsonFetch<{ options: { value: number; label: string }[] }>("/api/models/context-options", {
+      method: "POST",
+      body: JSON.stringify({ model }),
+    }),
   // Samplers que o modelo receberia agora + a procedência deles.
   modelSampling: (model: string, config?: LaunchConfig) =>
     jsonFetch<ModelSampling>("/api/models/sampling", {

@@ -57,6 +57,7 @@ def save_config(cfg: dict, path: Path = CONFIG_FILE) -> dict:
     else:
         cfg_id = uuid.uuid4().hex
         cfg["id"] = cfg_id
+    cfg["last_used"] = time.time()
     configs.append(cfg)
     _write(configs, path)
     return cfg

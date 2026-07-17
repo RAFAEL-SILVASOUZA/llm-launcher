@@ -126,6 +126,12 @@ export function ConfigGrid({
       );
     });
     const sorted = [...filtered].sort((a, b) => {
+      // Último usado sempre no topo, independente da coluna de ordenação.
+      const aLast = (a as any).last_used ?? 0;
+      const bLast = (b as any).last_used ?? 0;
+      if (aLast && bLast && aLast !== bLast) return bLast - aLast;
+      if (aLast && !bLast) return -1;
+      if (!aLast && bLast) return 1;
       const va: number | string =
         sortKey === "alias" ? modelAliasFromPath(a.model)
         : sortKey === "backend" ? (a.backend ?? "turbo")

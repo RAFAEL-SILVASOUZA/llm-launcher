@@ -243,6 +243,23 @@ def model_meta(req: MetaRequest):
     return meta
 
 
+class ContextOptionsRequest(BaseModel):
+    model: str
+
+
+@app.post("/api/models/context-options")
+def model_context_options(req: ContextOptionsRequest):
+    meta = gguf.read_meta(Path(req.model))
+    if meta is None:
+        raise HTTPException(404, "GGUF metadata não pôde ser lido")
+    n_ctx_train = meta.get("n_ctx_train")
+    if n_ctx_train is None:
+        return {"options": constants.CONTEXT_OPTIONS}
+    options = [{"value": n_ctx_train, "label": f"{n_ctx_train:,} tokens [modelo]"}]
+    options.extend(constants.CONTEXT_OPTIONS)
+    return {"options": options}
+
+
 class DefaultsRequest(BaseModel):
     model: str
     backend: str = "vanilla"
