@@ -24,6 +24,7 @@ import type {
   ModelDefaults,
   ModelInfo,
   ModelSampling,
+  ModelUpdate,
   NvidiaStatus,
   Options,
   RouterLaunchConfig,
@@ -102,6 +103,17 @@ export const api = {
     jsonFetch<ModelDefaults>("/api/models/defaults", {
       method: "POST",
       body: JSON.stringify({ model, backend, mode }),
+    }),
+
+  // Checagem de atualização de GGUFs. Sem deep: barato (tamanho + oid
+  // registrado/cacheado), pra rodar na inicialização. Deep: hasheia o arquivo
+  // pra confirmar — botão manual por modelo.
+  modelsUpdates: (deep = false) =>
+    jsonFetch<{ results: ModelUpdate[] }>(`/api/models/updates?deep=${deep ? "true" : "false"}`),
+  checkModelUpdate: (model: string, deep = true) =>
+    jsonFetch<ModelUpdate>("/api/models/check-update", {
+      method: "POST",
+      body: JSON.stringify({ model, deep }),
     }),
 
   listConfigs: () => jsonFetch<LaunchConfig[]>("/api/configs"),

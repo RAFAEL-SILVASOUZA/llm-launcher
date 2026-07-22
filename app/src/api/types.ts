@@ -260,6 +260,34 @@ export type HfDownloadEvent =
   | { type: "cancelled" }
   | { type: "done" };
 
+// ─── atualização de GGUF ───────────────────────────────────────────────────
+// Espelha api/core/updates.py. status: 'update_available' = o arquivo no HF
+// difere do local; 'up_to_date' = igual (verified=false quando só o tamanho
+// bateu e o sha256 não foi conferido); 'unknown' = sem repo de origem ou rede
+// indisponível.
+export type UpdateStatus = "up_to_date" | "update_available" | "unknown";
+
+export type ModelUpdateFile = {
+  name: string;
+  rel: string | null;
+  status: UpdateStatus;
+  verified: boolean;
+  reason: string;
+};
+
+export type ModelUpdate = {
+  path: string;
+  repo_id: string | null;
+  branch: string;
+  status: UpdateStatus;
+  verified: boolean;
+  has_origin: boolean;
+  base_dir: string;
+  rel_paths: string[];
+  files: ModelUpdateFile[];
+  error: string | null;
+};
+
 // ─── NVIDIA detalhado ──────────────────────────────────────────────────────
 
 export type NvidiaStatus =

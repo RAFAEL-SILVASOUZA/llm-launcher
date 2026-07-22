@@ -187,7 +187,13 @@ def read_meta(model_path: Path) -> dict | None:
         _GGUF_META_CACHE[key] = {}
         return None
 
-    head_dim_k = key_len or (n_embd // n_head)
+    # Modelos de atenção híbrida (Laguna etc.) gravam attention.head_count como
+    # array (um valor por camada). Downstream só quer um escalar representativo;
+    # max() capta o pior caso (GQA e fallback de head_dim), igual ao que já se
+    # faz com n_head_kv logo abaixo.
+    n_head_typ = max(n_head) if isinstance(n_head, list) else int(n_head)
+
+    head_dim_k = key_len or (n_embd // n_head_typ)
     head_dim_v = val_len or head_dim_k
 
     if isinstance(n_kv, list):
@@ -224,7 +230,7 @@ def read_meta(model_path: Path) -> dict | None:
         "n_ctx_train":       int(n_ctx_train) if n_ctx_train else None,
         "n_layer":           int(n_layer),
         "n_embd":            int(n_embd),
-        "n_head":            int(n_head),
+        "n_head":            n_head_typ,
         "n_head_kv":         n_kv_norm,
         "head_dim_k":        int(head_dim_k),
         "head_dim_v":        int(head_dim_v),

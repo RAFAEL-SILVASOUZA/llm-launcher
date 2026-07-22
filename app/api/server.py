@@ -71,6 +71,7 @@ from api.core import (  # noqa: E402
     running,
     sampling,
     settings_store,
+    updates,
 )
 
 @asynccontextmanager
@@ -208,6 +209,36 @@ def get_nvidia():
 def list_models():
     roots = settings_store.get_scan_paths()
     return [models_repo.describe_model(m, roots) for m in models_repo.collect_models(roots)]
+
+
+@app.get("/api/models/updates")
+def models_updates(deep: bool = False):
+    """Confere cada modelo contra o HF. `deep=true` autoriza hashear os ainda
+    não verificados (custo alto — reservado a botão manual). Sem deep, roda com
+    tamanho + oid registrado/cacheado, barato o bastante pra chamada de startup.
+
+    Um repo é consultado uma vez só (remote_cache), e falha de rede num modelo
+    não derruba os outros — cada um vira status 'unknown' isolado.
+    """
+    roots = settings_store.get_scan_paths()
+    remote_cache: dict[str, list[dict]] = {}
+    results = [
+        updates.check_model(m, roots, deep=deep, remote_cache=remote_cache)
+        for m in models_repo.collect_models(roots)
+    ]
+    return {"results": results}
+
+
+class CheckUpdateRequest(BaseModel):
+    model: str
+    deep: bool = True
+
+
+@app.post("/api/models/check-update")
+def model_check_update(req: CheckUpdateRequest):
+    """Checagem de um modelo só — default deep=true (hasheia pra confirmar)."""
+    roots = settings_store.get_scan_paths()
+    return updates.check_model(Path(req.model), roots, deep=req.deep)
 
 
 # ─── routes: app settings (paths das pastas de modelos, etc.) ─────────────────

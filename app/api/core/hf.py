@@ -85,10 +85,12 @@ def hf_list_files(repo_id: str, branch: str = "main") -> list[dict]:
         if not path:
             continue
         # `lfs.size` é o tamanho do blob LFS; `size` é o tamanho do pointer
-        # quando LFS. Pegamos o maior dos dois.
+        # quando LFS. Pegamos o maior dos dois. `lfs.oid` é o sha256 do conteúdo
+        # (mesma identidade do git-lfs) — é o que o detector de atualização compara
+        # contra o arquivo local. Arquivo não-LFS não tem oid.
         lfs = e.get("lfs") or {}
         size = max(int(e.get("size") or 0), int(lfs.get("size") or 0))
-        out.append({"path": path, "size": size})
+        out.append({"path": path, "size": size, "oid": lfs.get("oid")})
     return out
 
 
@@ -308,9 +310,11 @@ def plan_download(
         base_dir = base_dir / subdir
 
     sizes: dict[str, int] = {}
+    oids: dict[str, str | None] = {}
     try:
         for f in hf_list_files(repo_id, branch):
             sizes[f["path"]] = int(f.get("size") or 0)
+            oids[f["path"]] = f.get("oid")
     except Exception:
         # Sem tamanho a UI ainda funciona — só perde a validação pós-download
         # pra esses arquivos específicos.
@@ -325,6 +329,7 @@ def plan_download(
             "exists":        dest.exists(),
             "size_disk":     dest.stat().st_size if dest.exists() else 0,
             "expected_size": sizes.get(rel, 0),
+            "expected_oid":  oids.get(rel),
             "url":           f"https://huggingface.co/{repo_id}/resolve/{branch}/{rel}?download=true",
         })
     return {
@@ -415,6 +420,21 @@ def stream_download(plan: dict) -> Iterator[dict]:
                     break
         except Exception as e:
             yield {"type": "error", "rel": rel, "message": str(e)}
+
+    # Sidecar de procedência: registra repo/branch + size/oid de cada arquivo que
+    # ficou em disco. É o que permite ao detector de atualização comparar sha256
+    # sem re-hashear o .gguf depois. Best-effort — nunca invalida o download.
+    try:
+        from . import updates
+        present = [
+            {"rel": it["rel"], "size": it.get("expected_size"), "oid": it.get("expected_oid")}
+            for it in items if Path(it["dest"]).exists()
+        ]
+        if present:
+            updates.write_origin(Path(plan["base_dir"]), plan["repo_id"],
+                                 plan.get("branch", "main"), present)
+    except Exception:
+        pass
 
     # Sidecar de sampling: puxa o generation_config.json do repo (ou do base_model)
     # e grava sampling.json ao lado do .gguf. É o que faz um modelo recém-baixado

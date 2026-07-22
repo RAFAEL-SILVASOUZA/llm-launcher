@@ -3,7 +3,7 @@ import { Settings, HardDrive, Download, Cpu, Loader2, SlidersHorizontal, Plug } 
 import { api, downloadEventsStream } from "./api/client";
 import type {
   ActiveLaunchConfig, BackendStatus, Estimate, HfDownloadEvent, HfDownloadPlan,
-  LaunchConfig, ModelInfo, Options, SystemInfo,
+  LaunchConfig, ModelInfo, ModelUpdate, Options, SystemInfo,
 } from "./api/types";
 
 export type DownloadProgress = { dl: number; total: number; speed: number; done?: boolean };
@@ -25,6 +25,9 @@ export default function App() {
   const [backends, setBackends]   = useState<BackendStatus[]>([]);
   const [options, setOptions]     = useState<Options | null>(null);
   const [models, setModels]       = useState<ModelInfo[]>([]);
+  // Atualizações de GGUF por path do modelo. `null` na entrada = ainda checando.
+  const [updates, setUpdates]     = useState<Record<string, ModelUpdate>>({});
+  const [updatesChecking, setUpdatesChecking] = useState(false);
   const [configs, setConfigs]     = useState<LaunchConfig[]>([]);
   const [estimates, setEstimates] = useState<Record<string, Estimate>>({});
   const [loading, setLoading]     = useState(true);
@@ -122,6 +125,35 @@ export default function App() {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Checagem de atualização dos GGUFs. Roda na inicialização e sempre que o
+  // CONJUNTO de modelos muda (baixou/apagou) — não a cada refresh (launch/save
+  // recarregam a lista mas não mexem em quais modelos existem). É best-effort e
+  // em segundo plano: rede offline só deixa os status como 'unknown'.
+  const modelsKey = models.map((m) => m.path).join("|");
+  useEffect(() => {
+    if (models.length === 0) { setUpdates({}); return; }
+    let cancelled = false;
+    setUpdatesChecking(true);
+    api.modelsUpdates(false)
+      .then(({ results }) => {
+        if (cancelled) return;
+        const map: Record<string, ModelUpdate> = {};
+        for (const r of results) map[r.path] = r;
+        setUpdates(map);
+      })
+      .catch(() => { /* silencioso — sem badges, app segue normal */ })
+      .finally(() => { if (!cancelled) setUpdatesChecking(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelsKey]);
+
+  // Re-checagem profunda de UM modelo (hasheia pra confirmar). Botão manual.
+  const handleRecheckModel = useCallback(async (path: string): Promise<ModelUpdate> => {
+    const r = await api.checkModelUpdate(path, true);
+    setUpdates((prev) => ({ ...prev, [r.path]: r }));
+    return r;
+  }, []);
 
   // Poll periódico do system info pra barras se atualizarem enquanto edita.
   // 2 s casa com o TTL do cache de nvidia-smi no backend — sem polling extra
@@ -293,6 +325,21 @@ export default function App() {
     }
   };
 
+  // "Atualizar": reusa o pipeline de download pros arquivos que divergiram.
+  // rel_paths vem do detector (caminho remoto real, casa até repo com subdir) e
+  // base_dir é a pasta atual do modelo — re-baixa por cima, o downloader detecta
+  // tamanho errado, apaga e refaz. Leva pra aba Download pra acompanhar.
+  const handleUpdateModel = async (u: ModelUpdate) => {
+    if (!u.repo_id || u.rel_paths.length === 0) return;
+    setTab("download");
+    await handleStartDownload({
+      repo_id: u.repo_id,
+      rel_paths: u.rel_paths,
+      subdir: null,
+      base_dir: u.base_dir,
+    });
+  };
+
   const handleCancelDownload = async () => {
     if (!downloadId) return;
     try { await api.cancelDownload(downloadId); } catch { /* ignore */ }
@@ -368,7 +415,16 @@ export default function App() {
                 onOpenLaunchLogs={handleOpenLaunchLogs}
               />
             )}
-            {tab === "models"  && <ModelsPage  models={models} onAfterDelete={refresh} />}
+            {tab === "models"  && (
+              <ModelsPage
+                models={models}
+                updates={updates}
+                updatesChecking={updatesChecking}
+                onAfterDelete={refresh}
+                onRecheck={handleRecheckModel}
+                onUpdate={handleUpdateModel}
+              />
+            )}
             {tab === "download" && (
               <DownloadPage
                 downloadId={downloadId}
