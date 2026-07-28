@@ -35,8 +35,9 @@ type Props = {
 const cfgKey = (c: LaunchConfig) => c.id ?? `${c.model}|${c.backend}`;
 
 // O modo router roda todas as configs no MESMO llama-server.exe; mtp reusa o
-// binário do vanilla, então só turbo é grupo separado.
-const binGroup = (backend: string) => (backend === "turbo" ? "turbo" : "vanilla");
+// binário do vanilla, então turbo e custom é que são grupos separados.
+const binGroup = (backend: string) =>
+  backend === "turbo" ? "turbo" : backend === "custom" ? "custom" : "vanilla";
 
 export function ConfigGrid({
   configs, models, estimates,
@@ -161,6 +162,7 @@ export function ConfigGrid({
     { value: "turbo",   label: "turbo",   color: "bg-purple-900/40 text-purple-300 border-purple-800/60" },
     { value: "vanilla", label: "vanilla", color: "bg-blue-900/40   text-blue-300   border-blue-800/60" },
     { value: "mtp",     label: "mtp",     color: "bg-amber-900/40  text-amber-300  border-amber-800/60" },
+    { value: "custom",  label: "custom",  color: "bg-teal-900/40   text-teal-300   border-teal-800/60" },
   ];
 
   return (
@@ -335,7 +337,7 @@ export function ConfigGrid({
                   selectDisabledReason={
                     launchActive ? "pare o launch ativo antes de montar uma seleção"
                     : !c.id ? "config sem id — salve-a de novo"
-                    : groupBlocked ? "backend incompatível com a seleção (router usa um único binário; turbo não mistura com vanilla/mtp)"
+                    : groupBlocked ? "backend incompatível com a seleção (router usa um único binário; turbo e custom não misturam com vanilla/mtp)"
                     : undefined
                   }
                   onToggleSelect={() => toggleSelect(c)}
@@ -431,6 +433,14 @@ function FragmentRow(p: RowProps) {
         <td className="px-3 py-2 align-top">
           <div className="font-medium text-ink-100 truncate max-w-[28ch] flex items-center gap-2" title={c.model}>
             {p.alias}
+            {c.llama_auto && (
+              <span
+                className="text-[11px] px-1.5 py-0.5 rounded bg-sky-900/50 text-sky-300 mono shrink-0"
+                title="llama.cpp decide — comando mínimo; ctx/KV/-ngl abaixo ficam salvos mas não entram no comando"
+              >
+                auto
+              </span>
+            )}
             {p.isActive && (
               <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-300 mono shrink-0 flex items-center gap-1">
                 <Loader2 className="w-3 h-3 animate-spin" />running
@@ -445,6 +455,7 @@ function FragmentRow(p: RowProps) {
           <span className={`mono text-xs px-1.5 py-0.5 rounded ${
             backend === "turbo"   ? "bg-purple-900/40 text-purple-300" :
             backend === "vanilla" ? "bg-blue-900/40   text-blue-300" :
+            backend === "custom"  ? "bg-teal-900/40   text-teal-300" :
                                     "bg-amber-900/40  text-amber-300"
           }`}>{backend}</span>
         </td>

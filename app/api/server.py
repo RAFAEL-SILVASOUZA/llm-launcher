@@ -115,6 +115,9 @@ class LaunchConfig(BaseModel):
     spec_draft_n_max: int = 2
     mmproj: str | None = None
     verbose: bool = False
+    # "llama.cpp decide": comando mínimo (-m/--mmproj/--alias + HTTP). As demais
+    # chaves continuam persistidas, só não viram flag enquanto isto estiver on.
+    llama_auto: bool = False
     # Samplers. None = resolvido por modelo (generation_config do autor > preset do
     # chat template). sampler_source == "manual" trava os valores abaixo: é o usuário
     # mandando, e nada os sobrescreve.
@@ -712,6 +715,9 @@ class HfDownloadRequest(BaseModel):
     rel_paths: list[str]
     subdir: str | None = None
     base_dir: str
+    # Re-baixa mesmo se o arquivo já existir com o tamanho certo. Usado pelo
+    # botão "Atualizar", onde a divergência foi detectada por sha256.
+    force: bool = False
 
 
 class DownloadSession:
@@ -768,7 +774,8 @@ def hf_download(req: HfDownloadRequest):
             f"Caminho '{req.base_dir}' não está cadastrado. Caminhos válidos: "
             + ", ".join(str(p) for p in configured),
         )
-    plan = hf.plan_download(req.repo_id, req.branch, req.rel_paths, req.subdir, chosen)
+    plan = hf.plan_download(req.repo_id, req.branch, req.rel_paths, req.subdir,
+                            chosen, force=req.force)
     session = DownloadSession(plan)
     with _DOWNLOADS_LOCK:
         _DOWNLOADS[session.id] = session

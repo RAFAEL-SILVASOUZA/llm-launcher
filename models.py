@@ -33,6 +33,14 @@ LLAMA_CLI_MTP        = LLAMA_CLI_VANILLA
 # Caminho na convenção dos demais; ajustar quando o build existir.
 LLAMA_SERVER_DFLASH  = Path(r"C:\Projetos\llama-cpp-dflash\build\bin\Release\llama-server.exe")
 LLAMA_CLI_DFLASH     = Path(r"C:\Projetos\llama-cpp-dflash\build\bin\Release\llama-cli.exe")
+# custom: o build que ALGUNS modelos exigem (fork com a arch nova, patch de
+# tokenizer etc.). Sem identidade fixa — os caminhos abaixo são só a convenção;
+# quem manda é `backend_paths.custom` no app_settings.json (menu Settings, aqui
+# e na APP). Nada é assumido sobre o build: KV types vêm do probe do --help e
+# speculative MTP fica OFF (emitir --spec-type num fork desconhecido quebra o
+# load e o auto-degrade não sabe remover essa flag).
+LLAMA_SERVER_CUSTOM  = Path(r"C:\Projetos\llama-cpp-custom\build\bin\Release\llama-server.exe")
+LLAMA_CLI_CUSTOM     = Path(r"C:\Projetos\llama-cpp-custom\build\bin\Release\llama-cli.exe")
 
 BACKENDS: dict[str, dict] = {
     "turbo": {
@@ -63,7 +71,19 @@ BACKENDS: dict[str, dict] = {
         "supports_spec_mtp": False,
         "supports_spec_dflash": True,
     },
+    "custom": {
+        "label":            "custom      — build/fork específico de um modelo (caminho no menu Settings)",
+        "server":           LLAMA_SERVER_CUSTOM,
+        "cli":              LLAMA_CLI_CUSTOM,
+        "supports_spec_mtp": False,
+        "supports_spec_dflash": False,
+    },
 }
+# Backends que reusam o binário de outro (mtp = vanilla + --spec-type draft-mtp):
+# não têm diretório próprio no Settings e seguem o override do alvo.
+BACKEND_BINARY_ALIAS = {"mtp": "vanilla"}
+# Os que o usuário pode apontar pra outra pasta no menu Settings.
+CONFIGURABLE_BACKENDS = tuple(k for k in BACKENDS if k not in BACKEND_BINARY_ALIAS)
 LMS          = Path(r"C:\Users\PC\.lmstudio\bin\lms.exe")
 CONFIG_FILE  = Path(r"C:\Projetos\llama-cpp-turboquant\last_config.json")
 # Compartilhado com a app Electron (app/api/core/settings_store.py). Mesmo
@@ -311,10 +331,11 @@ SPEC_DRAFT_N_MAX_CHOICES = [
 
 def backend_choices_for_mode(mode: str) -> list[questionary.Choice]:
     """Lista os backends cujo binário existe pro modo escolhido (server|cli)."""
-    bin_key = "server" if mode == "server" else "cli"
     out: list[questionary.Choice] = []
     for name, b in BACKENDS.items():
-        path: Path = b[bin_key]
+        # backend_binary (e não b[...]): respeita o override do Settings, senão
+        # o custom apareceria sempre como "NÃO COMPILADO".
+        path: Path = backend_binary(name, mode)
         if path.exists():
             out.append(questionary.Choice(b["label"], value=name))
         else:
@@ -326,9 +347,61 @@ def backend_choices_for_mode(mode: str) -> list[questionary.Choice]:
     return out
 
 
+def get_backend_dir(backend: str) -> Path | None:
+    """Diretório de binários que o usuário configurou pra este backend, se houver.
+
+    Mesmo arquivo/schema do app (app/api/core/settings_store.py): a pasta é
+    apenas o diretório — o NOME do exe segue o hardcoded, preservando
+    `llama-server.exe`/`llama-cli.exe`. Backends-alias herdam o do alvo.
+    """
+    target = BACKEND_BINARY_ALIAS.get(backend, backend)
+    raw = _read_settings_file().get("backend_paths")
+    if isinstance(raw, dict):
+        v = raw.get(target)
+        if isinstance(v, str) and v.strip():
+            return Path(v.strip())
+    return None
+
+
+def default_backend_dir(backend: str) -> Path:
+    """Diretório default (pai do binário hardcoded). server e cli no mesmo
+    lugar — é o layout do build CMake."""
+    target = BACKEND_BINARY_ALIAS.get(backend, backend)
+    return BACKENDS[target]["server"].parent
+
+
+def save_backend_dirs(dirs: dict[str, str]) -> None:
+    """Sobrescreve `backend_paths` no settings, preservando outras chaves.
+    Entrada vazia = remove o override (volta pro default)."""
+    current = _read_settings_file()
+    out: dict[str, str] = {}
+    for name in CONFIGURABLE_BACKENDS:
+        v = (dirs.get(name) or "").strip()
+        if v:
+            out[name] = v
+    current["backend_paths"] = out
+    try:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.write_text(
+            json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"⚠️  Falha ao salvar settings: {e}")
+
+
 def backend_binary(backend: str, mode: str) -> Path:
-    """Caminho do binário pro par (backend, mode)."""
-    return BACKENDS[backend]["server" if mode == "server" else "cli"]
+    """Caminho do binário pro par (backend, mode).
+
+    Override do Settings (compartilhado com a APP) tem precedência sobre o
+    hardcoded; é o que torna o backend `custom` utilizável, já que o default
+    dele é só uma convenção de caminho.
+    """
+    target = BACKEND_BINARY_ALIAS.get(backend, backend)
+    default = BACKENDS[target]["server" if mode == "server" else "cli"]
+    custom_dir = get_backend_dir(target)
+    if custom_dir is not None:
+        return custom_dir / default.name
+    return default
 
 
 _BACKEND_HELP_CACHE: dict[tuple[str, str], str] = {}
@@ -400,6 +473,9 @@ _KV_TYPES_FALLBACK: dict[str, set[str]] = {
     "vanilla": {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
     "mtp":     {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
     "dflash":  {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
+    # custom: build desconhecido — assume o conjunto do upstream; o probe do
+    # --help do binário informado sobrescreve (é o caso normal).
+    "custom":  {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
 }
 
 # Ordem de preferência pro remap quando o tipo escolhido não é suportado pelo
@@ -966,6 +1042,11 @@ def _build_cmd_from_cfg(cfg: dict) -> str:
     """Reconstrói a cmd do llama-server a partir de uma config (possivelmente
     degradada) — usado entre tentativas sem voltar pra UI."""
     mmproj = cfg.get("mmproj")
+    if cfg.get("llama_auto", False):
+        return build_auto_command(
+            Path(cfg["model"]), cfg.get("backend", "turbo"),
+            Path(mmproj) if mmproj else None, cfg.get("verbose", False),
+        )
     return build_command(
         model_path=Path(cfg["model"]),
         backend=cfg.get("backend", "turbo"),
@@ -1098,6 +1179,15 @@ def run_server_resiliently(
             print("   Esse rope type/decoder ainda não é suportado por este build.")
             if questionary.confirm("🔁 Tentar carregar o modelo via LM Studio (lms)?", default=True).ask():
                 run_with_lms(model_path, context_window, parallel_slots)
+            return
+
+        # Modo auto: nenhum knob da config vira flag, então todo degrau geraria
+        # exatamente o mesmo comando — reiniciar seria loop até o teto.
+        if cfg.get("llama_auto", False):
+            _append_fail_history(attempt_cfg, failure, excerpt, None, attempt)
+            print(f"\n❌ {mode_label} caiu ({failure}: {excerpt[:120]})")
+            print("   Modo 'llama.cpp decide' está ligado — não há knob nosso pra degradar.")
+            print("   Desligue o modo auto e configure na mão pra habilitar o auto-degrade.")
             return
 
         # Tenta um degrau. Se a escada acabou, ou se o servidor ficou estável
@@ -1686,8 +1776,86 @@ def delete_flow() -> None:
 
 # ─── settings ─────────────────────────────────────────────────────────────────
 
+def backend_dirs_flow() -> None:
+    """Edita `backend_paths`: onde ficam llama-server.exe/llama-cli.exe de cada
+    backend. É por aqui que o backend `custom` ganha um caminho — sem isso ele
+    aponta pra convenção hardcoded, que normalmente não existe."""
+    while True:
+        print(f"\n🧰 Diretórios dos binários llama.cpp ({SETTINGS_FILE}):")
+        for name in CONFIGURABLE_BACKENDS:
+            cur = get_backend_dir(name)
+            eff = backend_binary(name, "server")
+            origem = "configurado" if cur else "default"
+            marker = "" if eff.exists() else "  ⚠️ llama-server.exe não encontrado"
+            print(f"   • {name:8s} [{origem}]: {eff.parent}{marker}")
+        print("   (mtp não aparece: reusa o binário do vanilla)")
+        print()
+
+        choices = [
+            questionary.Choice(f"✏️  Definir/alterar caminho — {name}", value=("set", name))
+            for name in CONFIGURABLE_BACKENDS
+        ]
+        choices += [
+            questionary.Choice("↩️  Voltar um backend pro default", value=("reset", None)),
+            questionary.Choice("✅ Sair",                            value=("quit", None)),
+        ]
+        action, name = questionary.select("O que você quer fazer?", choices=choices).ask() or ("quit", None)
+
+        if action == "quit":
+            return
+
+        if action == "reset":
+            configured = [n for n in CONFIGURABLE_BACKENDS if get_backend_dir(n)]
+            if not configured:
+                print("Nenhum backend com caminho customizado.")
+                continue
+            name = questionary.select(
+                "Qual backend voltar pro default?",
+                choices=[questionary.Choice(n, value=n) for n in configured],
+            ).ask()
+            if not name:
+                continue
+            dirs = {n: str(get_backend_dir(n) or "") for n in CONFIGURABLE_BACKENDS}
+            dirs[name] = ""
+            save_backend_dirs(dirs)
+            print(f"✅ {name} voltou pro default ({default_backend_dir(name)}).")
+            continue
+
+        # set
+        cur = get_backend_dir(name)
+        print(f"   Informe a PASTA que contém llama-server.exe e llama-cli.exe.")
+        print(f"   Default deste backend: {default_backend_dir(name)}")
+        new = questionary.text(
+            f"Pasta dos binários de '{name}' (vazio = default):",
+            default=str(cur) if cur else "",
+        ).ask()
+        if new is None:
+            continue
+        new = new.strip().strip('"')
+        if new:
+            p = Path(new)
+            # Erro clássico: apontar pro .exe em vez da pasta. Corrige em vez de
+            # salvar um caminho que nunca vai resolver.
+            if p.suffix.lower() == ".exe":
+                p = p.parent
+                print(f"   ℹ️  Caminho é um .exe — usando a pasta: {p}")
+            if not (p / "llama-server.exe").exists():
+                print(f"   ⚠️  {p / 'llama-server.exe'} não existe.")
+                if not questionary.confirm("Salvar mesmo assim?", default=False).ask():
+                    continue
+            new = str(p)
+        dirs = {n: str(get_backend_dir(n) or "") for n in CONFIGURABLE_BACKENDS}
+        dirs[name] = new
+        save_backend_dirs(dirs)
+        # O --help e os KV types são do binário antigo — invalida pra próxima
+        # pergunta de KV não oferecer os tipos do build anterior.
+        _BACKEND_HELP_CACHE.clear()
+        print("✅ Salvo." if new else f"✅ {name} voltou pro default.")
+
+
 def settings_flow() -> None:
-    """Edita a lista de pastas onde varremos GGUF. Compartilhado com a app."""
+    """Edita a lista de pastas onde varremos GGUF e os diretórios dos binários
+    do llama.cpp. Compartilhado com a app (mesmo app_settings.json)."""
     while True:
         paths = get_model_dirs()
         print(f"\n📁 Pastas configuradas ({SETTINGS_FILE}):")
@@ -1706,9 +1874,15 @@ def settings_flow() -> None:
                 questionary.Choice("✏️  Editar caminho",                  value="edit"),
                 questionary.Choice("🗑️  Remover caminho",                value="remove"),
                 questionary.Choice("↩️  Resetar para o default do LM Studio", value="reset"),
+                questionary.Choice("🧰 Diretórios dos binários llama.cpp (inclui o backend custom)",
+                                   value="backends"),
                 questionary.Choice("✅ Sair",                              value="quit"),
             ],
         ).ask()
+
+        if action == "backends":
+            backend_dirs_flow()
+            continue
 
         if not action or action == "quit":
             return
@@ -2960,6 +3134,59 @@ def _multi_gpu_flags(
     return out
 
 
+def build_auto_command(
+    model_path: Path,
+    backend:    str,
+    mmproj:     Path | None = None,
+    verbose:    bool = False,
+) -> str:
+    """Comando MÍNIMO do llama-server — o modo "llama.cpp decide" (llama_auto).
+
+    Só entra o que identifica o modelo (-m/--mmproj/--alias) e o que serve o
+    HTTP (--jinja/--metrics/--host/--port). Contexto, -ngl, KV, threads, batch,
+    samplers, reasoning e speculative ficam no default do próprio llama.cpp,
+    que decide a partir do GGUF e da máquina. É a saída de emergência pra
+    quando o nosso palpite atrapalha.
+    """
+    server_bin = backend_binary(backend, "server")
+    if not server_bin.exists():
+        print(f"❌ llama-server não encontrado em: {server_bin}")
+        print(f"   Compile o backend '{backend}' ou ajuste o caminho em BACKENDS.")
+        sys.exit(1)
+
+    cmd = f'"{server_bin}" -m "{model_path}"'
+    if mmproj:
+        cmd += f' --mmproj "{mmproj}"'
+    cmd += f' --alias "{make_alias(model_path)}"'
+    cmd += ' --jinja --metrics --host 0.0.0.0 --port 1234'
+    if verbose:
+        cmd += ' --verbose'
+    return cmd
+
+
+def build_auto_cli_command(
+    model_path: Path,
+    backend:    str,
+    mmproj:     Path | None = None,
+    verbose:    bool = False,
+) -> str:
+    """Modo auto no llama-cli: modelo + --conversation (é o que torna o CLI
+    interativo, não é tuning). O resto é default do llama.cpp."""
+    cli_bin = backend_binary(backend, "cli")
+    if not cli_bin.exists():
+        print(f"❌ llama-cli não encontrado em: {cli_bin}")
+        print(f"   Compile o backend '{backend}' ou ajuste o caminho em BACKENDS.")
+        sys.exit(1)
+
+    cmd = f'"{cli_bin}" -m "{model_path}"'
+    if mmproj:
+        cmd += f' --mmproj "{mmproj}"'
+    cmd += ' --conversation'
+    if verbose:
+        cmd += ' --verbose'
+    return cmd
+
+
 def build_command(
     model_path:       Path,
     backend:          str,
@@ -3204,8 +3431,10 @@ def main():
     if not any(not c.disabled for c in backend_choices):
         print(f"❌ Nenhum binário do llama.cpp encontrado pro modo '{mode}'.")
         print("   Caminhos esperados:")
-        for name, b in BACKENDS.items():
-            print(f"   • {name:8s}: {b['server' if mode == 'server' else 'cli']}")
+        for name in BACKENDS:
+            print(f"   • {name:8s}: {backend_binary(name, mode)}")
+        print("   (o menu Settings → 'diretórios dos binários' aponta cada um "
+              "pra outra pasta)")
         sys.exit(1)
 
     backend: str = questionary.select(
@@ -3252,6 +3481,8 @@ def main():
     # ── config anterior deste (modelo, backend)? ─────────────────────────────
     prev_cfg = load_config(model_path, backend)
     use_prev = False
+    # "llama.cpp decide": comando mínimo, sem nenhuma flag de tuning nossa.
+    llama_auto = False
 
     if prev_cfg:
         prev_alias = make_alias(Path(prev_cfg.get("model", "")))
@@ -3271,6 +3502,9 @@ def main():
         ncmoe_str = str(ncmoe) if ncmoe else "—"
 
         print(f"│  Backend         : {backend}")
+        if prev_cfg.get("llama_auto"):
+            print( "│  Auto            : ON — llama.cpp decide (comando mínimo)")
+            print( "│                    (as opções abaixo ficam salvas, mas não viram flag)")
         print(f"│  Contexto        : {ctx_str}  (pool, dividido pelos slots)")
         print(f"│  KV Cache        : {prev_cfg.get('kv_cache', '?')}")
         print(f"│  Flash Attention : {prev_cfg.get('flash_attn', '?')}")
@@ -3292,6 +3526,7 @@ def main():
         print()
         if questionary.confirm("   Usar a configuração salva?", default=True).ask():
             use_prev = True
+            llama_auto       = bool(prev_cfg.get("llama_auto", False))
             context_window   = prev_cfg.get("context_window", 65_536)
             kv_cache         = prev_cfg.get("kv_cache", "turbo4")
             kv_cache, warn   = remap_kv_for_backend(kv_cache, backend, mode)
@@ -3328,14 +3563,65 @@ def main():
                 p = Path(prev_cfg["mmproj"])
                 use_mmproj = p if p.exists() else None
 
-            show_memory_estimate(
-                model_path, backend, context_window, parallel_slots,
-                kv_cache, gpu_layers, use_mmproj, cache_ram, mode,
-                verbose=True, header="estimativa da configuração salva",
-                n_cpu_moe=n_cpu_moe,
-            )
+            if llama_auto:
+                # Estimar com valores que não vão pro comando seria inventar
+                # número: quem escolhe ctx/-ngl/KV aqui é o llama.cpp.
+                print("   🤖 Modo auto ligado — sem estimativa: o llama.cpp escolhe "
+                      "ctx, -ngl e KV sozinho.")
+            else:
+                show_memory_estimate(
+                    model_path, backend, context_window, parallel_slots,
+                    kv_cache, gpu_layers, use_mmproj, cache_ram, mode,
+                    verbose=True, header="estimativa da configuração salva",
+                    n_cpu_moe=n_cpu_moe,
+                )
 
     if not use_prev:
+        # ── "llama.cpp decide" ───────────────────────────────────────────────
+        # Marcou = o comando sai com o mínimo (-m/--mmproj/--alias + HTTP) e
+        # nenhuma pergunta de tuning é feita. É a saída pra quando o palpite da
+        # ferramenta atrapalha mais do que ajuda.
+        llama_auto = bool(questionary.confirm(
+            "🤖 Deixar o llama.cpp decidir tudo? (comando mínimo: só o modelo + "
+            "--alias/--jinja/--metrics/--host/--port)",
+            default=False,
+        ).ask())
+
+    if llama_auto and not use_prev:
+        # Valores abaixo NÃO viram flag — existem só pra config salva ficar
+        # completa e sã caso o usuário desligue o auto depois.
+        mmproj = find_mmproj(model_path.parent)
+        use_mmproj: Path | None = None
+        if mmproj:
+            if questionary.confirm("🖼️  Habilitar suporte a imagem (--mmproj)?", default=True).ask():
+                use_mmproj = mmproj
+        verbose = bool(questionary.confirm(
+            "🪵 Verbose (--verbose)? Loga prompt renderizado e mais detalhes",
+            default=False,
+        ).ask())
+        context_window    = 65_536
+        kv_cache          = "q8_0"
+        kv_cache, _       = remap_kv_for_backend(kv_cache, backend, mode)
+        flash_attn        = True
+        gpu_layers        = 99
+        n_cpu_moe         = 0
+        parallel_slots    = 1
+        reasoning_budget  = None
+        mlock             = False
+        max_tokens        = -1
+        batch_size        = 2_048
+        ubatch_size       = 512
+        threads_gen       = CPU_THREADS_GEN
+        threads_batch     = CPU_THREADS_BATCH
+        cache_ram         = 8_192
+        ctx_checkpoints   = 8
+        spec_draft_n_max  = 2
+        spec_dflash_draft = None
+        split_mode        = None
+        tensor_split      = None
+        main_gpu          = None
+
+    if not use_prev and not llama_auto:
         # ── mmproj ───────────────────────────────────────────────────────────
         mmproj     = find_mmproj(model_path.parent)
         use_mmproj: Path | None = None
@@ -3626,10 +3912,13 @@ def main():
         ).ask()
 
     # ── remap KV se o backend não suporta o tipo escolhido (ex: turbo* em vanilla) ──
-    new_kv, warning = remap_kv_for_backend(kv_cache, backend, mode)
-    if warning:
-        print(f"⚠️  {warning}")
-        kv_cache = new_kv
+    # No modo auto não há --cache-type-k/v no comando: avisar sobre um remap que
+    # não vai pra lugar nenhum só confundiria.
+    if not llama_auto:
+        new_kv, warning = remap_kv_for_backend(kv_cache, backend, mode)
+        if warning:
+            print(f"⚠️  {warning}")
+            kv_cache = new_kv
 
     # ── preserve_thinking ────────────────────────────────────────────────────
     # Pergunta se deve ligar --chat-template-kwargs '{"preserve_thinking": true}'
@@ -3641,8 +3930,10 @@ def main():
     # Fora desses casos não há o que decidir e fica OFF. O default do prompt é
     # ON (a decisão automática antiga). O binário ainda é checado via --help; se
     # faltar suporte, o auto-degrade remove a flag na primeira queda.
-    preserve_thinking = False
-    if mode == "server" and reasoning_budget not in (None, 0):
+    # No modo auto o kwarg não é emitido e não há o que perguntar — o valor da
+    # config salva é preservado como está, pra não ser zerado por um launch auto.
+    preserve_thinking = bool(prev_cfg.get("preserve_thinking", False)) if (llama_auto and use_prev) else False
+    if not llama_auto and mode == "server" and reasoning_budget not in (None, 0):
         _pt_meta = _gguf_meta(model_path)
         if (_pt_meta and _pt_meta.get("supports_preserve_thinking")
                 and _backend_supports_chat_template_kwargs(backend, "server")):
@@ -3683,13 +3974,22 @@ def main():
         "main_gpu":       main_gpu,
         "mmproj":         str(use_mmproj) if use_mmproj else None,
         "verbose":        verbose,
+        # ON = comando mínimo; nenhuma chave acima vira flag (elas seguem
+        # salvas e voltam a valer assim que o auto for desligado).
+        "llama_auto":     llama_auto,
     }
     save_config(cfg)
 
     print()
 
     # ── build e execução ─────────────────────────────────────────────────────
-    if mode == "server":
+    if llama_auto:
+        cmd = (
+            build_auto_command(model_path, backend, use_mmproj, verbose)
+            if mode == "server"
+            else build_auto_cli_command(model_path, backend, use_mmproj, verbose)
+        )
+    elif mode == "server":
         cmd = build_command(
             model_path=model_path,
             backend=backend,
@@ -3750,34 +4050,41 @@ def main():
 
     ncmoe_tail = f"  |  ncmoe: {n_cpu_moe}" if n_cpu_moe else ""
     print(f"🚀 Iniciando [{mode_label}] backend={backend}: {alias}")
-    if mode == "server" and parallel_slots > 1:
-        print(f"   ctx: {context_window:,}/slot  (-c {context_window * parallel_slots:,} total)  |  kv: {kv_cache}  |  fa: {flash_attn}  |  ngl: {gpu_layers}{ncmoe_tail}")
+    if llama_auto:
+        # Só o que realmente vai na linha de comando — listar ctx/kv/ngl aqui
+        # seria mentir sobre o que o processo vai usar.
+        print("   🤖 auto: llama.cpp decide ctx, -ngl, KV, threads, samplers e reasoning")
+        print(f"   {img_status}  |  {verbose_status}")
     else:
-        print(f"   ctx: {context_window:,}  |  kv: {kv_cache}  |  fa: {flash_attn}  |  ngl: {gpu_layers}{ncmoe_tail}")
-    if mode == "server":
-        print(f"   np: {parallel_slots}  |  b: {batch_size}  |  ub: {ubatch_size}  |  t: {threads_gen}/{threads_batch}  |  mlock: {mlock}")
-        print(f"   cache-ram: {cache_ram} MiB  |  ctx-checkpoints: {ctx_checkpoints}")
-    else:
-        print(f"   b: {batch_size}  |  ub: {ubatch_size}  |  t: {threads_gen}/{threads_batch}  |  mlock: {mlock}")
-    if budget_status:
-        print(f"   {budget_status}  |  n: {max_tokens}  |  {img_status}  |  {verbose_status}")
-    else:
-        print(f"   n: {max_tokens}  |  {img_status}  |  {verbose_status}")
-    if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
-        print(f"   spec-mtp: draft-mtp  |  spec-draft-n-max: {spec_draft_n_max}")
-    if BACKENDS[backend].get("supports_spec_dflash") and spec_dflash_draft:
-        print(f"   spec-dflash: {Path(spec_dflash_draft).name}  (--spec-dflash-default)")
-    if preserve_thinking:
-        print('   chat-template-kwargs: {"preserve_thinking": true}')
+        if mode == "server" and parallel_slots > 1:
+            print(f"   ctx: {context_window:,}/slot  (-c {context_window * parallel_slots:,} total)  |  kv: {kv_cache}  |  fa: {flash_attn}  |  ngl: {gpu_layers}{ncmoe_tail}")
+        else:
+            print(f"   ctx: {context_window:,}  |  kv: {kv_cache}  |  fa: {flash_attn}  |  ngl: {gpu_layers}{ncmoe_tail}")
+        if mode == "server":
+            print(f"   np: {parallel_slots}  |  b: {batch_size}  |  ub: {ubatch_size}  |  t: {threads_gen}/{threads_batch}  |  mlock: {mlock}")
+            print(f"   cache-ram: {cache_ram} MiB  |  ctx-checkpoints: {ctx_checkpoints}")
+        else:
+            print(f"   b: {batch_size}  |  ub: {ubatch_size}  |  t: {threads_gen}/{threads_batch}  |  mlock: {mlock}")
+        if budget_status:
+            print(f"   {budget_status}  |  n: {max_tokens}  |  {img_status}  |  {verbose_status}")
+        else:
+            print(f"   n: {max_tokens}  |  {img_status}  |  {verbose_status}")
+        if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
+            print(f"   spec-mtp: draft-mtp  |  spec-draft-n-max: {spec_draft_n_max}")
+        if BACKENDS[backend].get("supports_spec_dflash") and spec_dflash_draft:
+            print(f"   spec-dflash: {Path(spec_dflash_draft).name}  (--spec-dflash-default)")
+        if preserve_thinking:
+            print('   chat-template-kwargs: {"preserve_thinking": true}')
     print()
     print(f"   {cmd}\n")
 
-    show_memory_estimate(
-        model_path, backend, context_window, parallel_slots,
-        kv_cache, gpu_layers, use_mmproj, cache_ram, mode,
-        verbose=True, header="estimativa antes do launch",
-        n_cpu_moe=n_cpu_moe,
-    )
+    if not llama_auto:
+        show_memory_estimate(
+            model_path, backend, context_window, parallel_slots,
+            kv_cache, gpu_layers, use_mmproj, cache_ram, mode,
+            verbose=True, header="estimativa antes do launch",
+            n_cpu_moe=n_cpu_moe,
+        )
 
     if mode == "server":
         stop_lms_server_if_running()

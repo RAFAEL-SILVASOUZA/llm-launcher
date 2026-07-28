@@ -41,8 +41,15 @@ export type ModelSampling = Sampler & {
   from_repo?: string | null;
 };
 
+// Backends de llama.cpp. `mtp` não é build próprio (é o vanilla + --spec-type
+// draft-mtp); `custom` é o build/fork que um modelo específico exige — sem
+// identidade fixa, o caminho vem do Settings.
+export type BackendName = "turbo" | "vanilla" | "mtp" | "custom";
+// Os que têm diretório próprio configurável (mtp segue o vanilla).
+export type ConfigurableBackend = "turbo" | "vanilla" | "custom";
+
 export type BackendStatus = {
-  name: "turbo" | "vanilla" | "mtp";
+  name: BackendName;
   label: string;
   description: string;
   server_path: string;
@@ -107,7 +114,7 @@ export type GgufMeta = {
 export type LaunchConfig = {
   id?: string;   // identidade estável; o backend gera no 1º save se ausente
   model: string;
-  backend: "turbo" | "vanilla" | "mtp";
+  backend: BackendName;
   context_window: number;
   kv_cache: string;
   flash_attn: boolean;
@@ -127,6 +134,9 @@ export type LaunchConfig = {
   spec_draft_n_max: number;
   mmproj: string | null;
   verbose: boolean;
+  // "llama.cpp decide": comando mínimo (-m/--mmproj/--alias + --jinja/--metrics/
+  // --host/--port). O resto da config continua salvo, só não vira flag.
+  llama_auto?: boolean;
   // Samplers. null = resolvido por modelo no backend. sampler_source "manual"
   // trava os valores: o usuário editou e nada os sobrescreve.
   temp?: number | null;
@@ -282,6 +292,10 @@ export type ModelUpdate = {
   status: UpdateStatus;
   verified: boolean;
   has_origin: boolean;
+  // Alvo do re-download: raiz cadastrada + subdir dentro de owner/repo. É o que
+  // o endpoint de download espera; base_dir é só a pasta final, pra exibição.
+  root: string | null;
+  subdir: string | null;
   base_dir: string;
   rel_paths: string[];
   files: ModelUpdateFile[];
@@ -312,8 +326,8 @@ export type AppSettings = {
   // Override do diretório dos binários por backend. Chave ausente / valor
   // vazio = usa o default em backend_paths_defaults. mtp não entra: reusa o
   // build do vanilla (MTP nativo no upstream), então segue o path do vanilla.
-  backend_paths: Partial<Record<"turbo" | "vanilla", string>>;
-  backend_paths_defaults: Record<"turbo" | "vanilla", string>;
+  backend_paths: Partial<Record<ConfigurableBackend, string>>;
+  backend_paths_defaults: Record<ConfigurableBackend, string>;
 };
 
 export type LmsLoadResult = {

@@ -104,22 +104,57 @@ def aggregate(verdicts: list[FileVerdict]) -> tuple[str, bool]:
     return UP_TO_DATE, all(v.verified for v in verdicts)
 
 
-def infer_repo_id(model_path: Path, roots: list[Path]) -> str | None:
-    """`owner/repo` a partir do layout `<root>/<owner>/<repo>/.../arquivo.gguf`.
+def locate_under_roots(
+    model_path: Path, roots: list[Path]
+) -> tuple[Path, tuple[str, ...]] | None:
+    """(raiz que contém o modelo, partes do caminho relativo a ela).
 
-    None se o modelo não está sob nenhuma raiz conhecida, ou está solto direto na
-    raiz (sem os dois níveis owner/repo) — aí não há repo de origem pra consultar.
+    None se o modelo não está sob nenhuma raiz conhecida. A primeira raiz que
+    casa vence — raízes aninhadas são patológicas e não valem o desempate.
     """
     for root in roots:
         try:
             rel = model_path.relative_to(root)
         except ValueError:
             continue
-        parts = rel.parts
-        if len(parts) >= 3:  # owner / repo / … / arquivo.gguf
-            return f"{parts[0]}/{parts[1]}"
-        return None
+        return root, rel.parts
     return None
+
+
+def infer_repo_id(model_path: Path, roots: list[Path]) -> str | None:
+    """`owner/repo` a partir do layout `<root>/<owner>/<repo>/.../arquivo.gguf`.
+
+    None se o modelo não está sob nenhuma raiz conhecida, ou está solto direto na
+    raiz (sem os dois níveis owner/repo) — aí não há repo de origem pra consultar.
+    """
+    found = locate_under_roots(model_path, roots)
+    if found is None:
+        return None
+    _, parts = found
+    if len(parts) >= 3:  # owner / repo / … / arquivo.gguf
+        return f"{parts[0]}/{parts[1]}"
+    return None
+
+
+def download_target(model_path: Path, roots: list[Path]) -> tuple[str | None, str | None]:
+    """(raiz, subdir) que fazem o re-download cair na MESMA pasta do modelo.
+
+    O endpoint de download monta o destino como `<raiz>/<owner>/<repo>[/<subdir>]`
+    (ver `hf.plan_download`) e só aceita raízes cadastradas em Settings. Mandar a
+    pasta final do modelo, portanto, é errado duas vezes: é rejeitada na
+    validação e, se passasse, aninharia `owner/repo` de novo dentro dela.
+
+    (None, None) quando o modelo está fora do layout — aí não dá pra re-baixar
+    por cima com segurança.
+    """
+    found = locate_under_roots(model_path, roots)
+    if found is None:
+        return None, None
+    root, parts = found
+    if len(parts) < 3:  # solto na raiz ou sem owner/repo: sem alvo confiável
+        return None, None
+    subdir = "/".join(parts[2:-1])  # o que houver entre <owner>/<repo> e o arquivo
+    return str(root), (subdir or None)
 
 
 def match_remote(name: str, remote_files: list[dict]) -> dict | None:
@@ -299,6 +334,7 @@ def check_model(
     origin = read_origin(model_path)
     repo_id = (origin or {}).get("repo_id") or infer_repo_id(model_path, roots)
     branch = (origin or {}).get("branch") or "main"
+    root, subdir = download_target(model_path, roots)
 
     result = {
         "path": str(model_path),
@@ -307,9 +343,15 @@ def check_model(
         "status": UNKNOWN,
         "verified": False,
         "has_origin": origin is not None,
-        # base_dir + rel_paths alimentam o botão "Atualizar", que reusa o mesmo
-        # pipeline de download. rel_paths é o caminho REMOTO que casou (não o
-        # basename local achatado), então re-baixar acerta até repo com subdir.
+        # root + subdir + rel_paths alimentam o botão "Atualizar", que reusa o
+        # mesmo pipeline de download: o endpoint remonta o destino a partir da
+        # raiz cadastrada, então é ela que vai aqui — não a pasta do modelo.
+        # rel_paths é o caminho REMOTO que casou (não o basename local
+        # achatado), então re-baixar acerta até repo com subdir.
+        "root": root,
+        "subdir": subdir,
+        # Informativo (a pasta que o download vai reescrever); a UI não manda
+        # este valor de volta pro backend.
         "base_dir": str(model_path.parent),
         "rel_paths": [],
         "files": [],

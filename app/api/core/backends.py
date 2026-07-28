@@ -27,6 +27,9 @@ KV_TYPES_FALLBACK: dict[str, set[str]] = {
     "turbo":   {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1","turbo2","turbo3","turbo4"},
     "vanilla": {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
     "mtp":     {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
+    # custom: build desconhecido — o fallback é o conjunto do upstream, mas o
+    # probe do --help do binário informado sobrescreve (é o caso normal).
+    "custom":  {"f32","f16","bf16","q8_0","q4_0","q4_1","iq4_nl","q5_0","q5_1"},
 }
 
 KV_REMAP_FALLBACK: dict[str, list[str]] = {

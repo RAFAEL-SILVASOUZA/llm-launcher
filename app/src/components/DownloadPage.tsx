@@ -18,7 +18,7 @@ type Props = {
   // no picker de quant. Detecção é por prefixo `owner/repo[/subdir]` do
   // relative_path (que o backend gera a partir das pastas configuradas).
   models: ModelInfo[];
-  onStart:  (req: { repo_id: string; rel_paths: string[]; subdir?: string | null; base_dir: string }) => Promise<void>;
+  onStart:  (req: { repo_id: string; rel_paths: string[]; subdir?: string | null; base_dir: string; force?: boolean }) => Promise<void>;
   onCancel: () => Promise<void>;
   onReset:  () => void;
 };
@@ -262,6 +262,23 @@ export function DownloadPage({
           <div className="text-sm text-red-400 mono">{pickerError}</div>
         )}
       </section>
+
+      {/* Falha ao ABRIR o download (400 de pasta não cadastrada, backend fora,
+          alvo inválido vindo do botão "atualizar"): não há plan nenhum, então
+          este banner precisa viver fora da seção de progresso — senão o erro
+          fica invisível e a tela parece não reagir ao clique. */}
+      {error && !plan && (
+        <div className="bg-red-950/60 border border-red-800 text-red-200 rounded p-3 text-sm mono flex items-start gap-2">
+          <XCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="flex-1">{error}</span>
+          <button
+            onClick={onReset}
+            className="text-xs px-2 py-1 rounded bg-red-900/60 hover:bg-red-800 shrink-0"
+          >
+            fechar
+          </button>
+        </div>
+      )}
 
       {/* ── Search results ───────────────────────────────────────────── */}
       {sortedResults && (

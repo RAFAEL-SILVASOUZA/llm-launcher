@@ -366,6 +366,17 @@ def run_server_resiliently(
                       "excerpt": excerpt, "hint": "redownload_model"})
             return
 
+        # Modo auto: nenhum knob da config vira flag, então todo degrau geraria
+        # exatamente o mesmo comando — reiniciar seria loop até o teto. Para
+        # aqui e devolve a evidência pro usuário decidir (desmarcar o auto e
+        # configurar na mão, ou rebaixar o quant).
+        if cfg.get("llama_auto", False):
+            append_fail_history(attempt_cfg, failure, excerpt, None, attempt)
+            on_event({"type": "giveup", "reason": "auto_mode_no_degrade",
+                      "failure": failure, "excerpt": excerpt,
+                      "hint": "desmarque 'llama.cpp decide' pra habilitar o auto-degrade"})
+            return
+
         new_cfg, degrade_desc = next_degrade(cfg, failure, excerpt)
         append_fail_history(attempt_cfg, failure, excerpt, degrade_desc, attempt)
 

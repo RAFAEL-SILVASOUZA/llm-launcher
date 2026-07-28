@@ -42,6 +42,7 @@ const DEFAULT_CFG: LaunchConfig = {
   spec_draft_n_max: 2,
   mmproj: null,
   verbose: false,
+  llama_auto: false,
   temp: null,
   top_p: null,
   top_k: null,
@@ -223,13 +224,19 @@ export function ConfigEditor({
     }));
 
   // Preenche a config inteira com o que dá pra derivar do modelo + da máquina.
-  // Preserva só o que é escolha do usuário e não do modelo: backend e modo.
+  // Preserva só o que é escolha do usuário e não do modelo: backend, modo e o
+  // "llama.cpp decide".
   const applyDefaults = async () => {
     if (!cfg.model) return;
     setApplyingDefaults(true);
     try {
       const d = await api.modelDefaults(cfg.model, cfg.backend, cfg.mode ?? "server");
-      setCfg((c) => ({ ...d.config, id: c.id, backend: c.backend, mode: c.mode }));
+      // llama_auto acompanha backend/mode: é escolha do usuário sobre COMO
+      // lançar, não algo derivado do GGUF — os defaults não devem mexer nele.
+      setCfg((c) => ({
+        ...d.config, id: c.id, backend: c.backend, mode: c.mode,
+        llama_auto: c.llama_auto,
+      }));
       setDefaultsNotes(d.notes);
     } catch (err) {
       setDefaultsNotes([`falhou: ${(err as Error).message}`]);
@@ -297,7 +304,21 @@ export function ConfigEditor({
         <div className="p-5 space-y-5 overflow-y-auto">
 
           <Section title="Modelo & backend">
-            <Field label="Modelo (.gguf)">
+            <div className="block">
+              <div className="flex items-center justify-between gap-3 mb-1">
+                <span className="text-xs text-ink-400">Modelo (.gguf)</span>
+                <label
+                  className="flex items-center gap-1.5 text-xs text-ink-300 cursor-pointer shrink-0"
+                  title="Comando mínimo: só -m/--mmproj/--alias e o HTTP. Contexto, -ngl, KV, threads, samplers e reasoning ficam no default do llama.cpp."
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!cfg.llama_auto}
+                    onChange={(e) => setCfg((c) => ({ ...c, llama_auto: e.target.checked }))}
+                  />
+                  llama.cpp decide (comando mínimo)
+                </label>
+              </div>
               <select
                 value={cfg.model}
                 onChange={(e) => {
@@ -317,7 +338,16 @@ export function ConfigEditor({
                   </option>
                 ))}
               </select>
-            </Field>
+            </div>
+
+            {cfg.llama_auto && (
+              <p className="text-[11px] text-amber-300 border border-amber-700/40 bg-amber-900/20 rounded px-2 py-1.5 leading-snug">
+                🤖 Modo auto: o comando leva só o modelo (+ mmproj) e o servidor
+                HTTP. Tudo abaixo continua salvo na configuração, mas não vira
+                flag — e o auto-degrade fica desligado, já que não há knob nosso
+                pra baixar. A estimativa de memória vira só referência.
+              </p>
+            )}
 
             {cfg.model && (
               <div className="space-y-2">
@@ -344,7 +374,9 @@ export function ConfigEditor({
             )}
 
             <Field label="Backend">
-              <div className="flex gap-2">
+              {/* grid 2×2: com 4 backends o flex deixava os cards estreitos
+                  demais pra descrição caber em duas linhas. */}
+              <div className="grid grid-cols-2 gap-2">
                 {backends.map((b) => (
                   <label
                     key={b.name}
@@ -366,7 +398,18 @@ export function ConfigEditor({
                     </div>
                     <div className="text-xs text-ink-500 mt-0.5">{b.description}</div>
                     {!b.server_available && (
-                      <div className="text-[11px] text-red-400 mt-1">binário não compilado</div>
+                      <div className="text-[11px] text-red-400 mt-1" title={b.server_path}>
+                        {b.name === "custom"
+                          // O custom não tem build "certo": o que falta é o
+                          // caminho, não a compilação.
+                          ? "sem caminho — configure em Settings"
+                          : "binário não compilado"}
+                      </div>
+                    )}
+                    {b.name === "custom" && b.server_available && (
+                      <div className="text-[11px] text-ink-500 mt-1 truncate" title={b.server_path}>
+                        {b.server_path}
+                      </div>
                     )}
                   </label>
                 ))}
@@ -392,6 +435,7 @@ export function ConfigEditor({
             )}
           </Section>
 
+          <Ignored when={!!cfg.llama_auto} className="space-y-5">
           <Section title="Contexto & KV">
             <div className="grid grid-cols-2 gap-3">
               <Field label="Context window (pool -kvu)">
@@ -688,8 +732,10 @@ export function ConfigEditor({
               <div className="text-xs text-ink-500">selecione um modelo</div>
             )}
           </Section>
+          </Ignored>
 
           <Section title="Generation & misc">
+            <Ignored when={!!cfg.llama_auto}>
             <div className="grid grid-cols-2 gap-3">
               <Field label="max-tokens (-n)">
                 <SelectFromOptions
@@ -729,15 +775,18 @@ export function ConfigEditor({
                 </div>
               </Field>
             </div>
+            </Ignored>
             <div className="flex gap-4 mt-2">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={cfg.mlock}
-                  onChange={(e) => setCfg((c) => ({ ...c, mlock: e.target.checked }))}
-                />
-                --mlock
-              </label>
+              <Ignored when={!!cfg.llama_auto}>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={cfg.mlock}
+                    onChange={(e) => setCfg((c) => ({ ...c, mlock: e.target.checked }))}
+                  />
+                  --mlock
+                </label>
+              </Ignored>
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
@@ -836,6 +885,24 @@ function SamplerSourceBadge({ source, fromRepo, thinking }: {
     <div className={`text-[11px] border rounded px-2 py-1 leading-tight ${cls}`} title={why}>
       <span className="font-medium">{label}</span>
       <span className="opacity-70"> · {why}</span>
+    </div>
+  );
+}
+
+// Opções que o modo auto não emite. Continuam editáveis de propósito — o valor
+// fica salvo e volta a valer no instante em que o checkbox é desmarcado —, só
+// aparecem esmaecidas pra ninguém ajustar achando que muda o comando.
+function Ignored({ when, className, children }: {
+  when: boolean; className?: string; children: React.ReactNode;
+}) {
+  return (
+    <div
+      // O className carrega o espaçamento que era do container pai (o wrapper
+      // vira o filho direto dele e herdaria só um gap).
+      className={[className, when ? "opacity-40" : ""].filter(Boolean).join(" ") || undefined}
+      title={when ? "não entra no comando enquanto 'llama.cpp decide' estiver marcado" : undefined}
+    >
+      {children}
     </div>
   );
 }

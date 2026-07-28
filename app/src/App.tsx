@@ -308,6 +308,7 @@ export default function App() {
 
   const handleStartDownload = async (req: {
     repo_id: string; rel_paths: string[]; subdir?: string | null; base_dir: string;
+    force?: boolean;
   }) => {
     setDownloadEvents([]);
     setDownloadProgress({});
@@ -326,17 +327,32 @@ export default function App() {
   };
 
   // "Atualizar": reusa o pipeline de download pros arquivos que divergiram.
-  // rel_paths vem do detector (caminho remoto real, casa até repo com subdir) e
-  // base_dir é a pasta atual do modelo — re-baixa por cima, o downloader detecta
-  // tamanho errado, apaga e refaz. Leva pra aba Download pra acompanhar.
+  // rel_paths vem do detector (caminho remoto real, casa até repo com subdir);
+  // root/subdir também vêm de lá e reconstroem exatamente a pasta atual do
+  // modelo — o endpoint monta `<root>/<owner>/<repo>/<subdir>` e só aceita raiz
+  // cadastrada, por isso não mandamos a pasta final. Re-baixa por cima: o
+  // downloader vê o tamanho errado, apaga e refaz. Leva pra aba Download pra
+  // acompanhar.
   const handleUpdateModel = async (u: ModelUpdate) => {
     if (!u.repo_id || u.rel_paths.length === 0) return;
     setTab("download");
+    if (!u.root) {
+      handleResetDownload();
+      setDownloadError(
+        `Não dá pra atualizar ${u.path}: o modelo não está sob nenhuma pasta ` +
+        "cadastrada no layout owner/repo. Baixe manualmente pela busca.",
+      );
+      setDownloadDone(true);
+      return;
+    }
     await handleStartDownload({
       repo_id: u.repo_id,
       rel_paths: u.rel_paths,
-      subdir: null,
-      base_dir: u.base_dir,
+      subdir: u.subdir,
+      base_dir: u.root,
+      // Sem force o downloader pularia por "já existe": a divergência mais
+      // comum é sha256 com o MESMO tamanho, e o update não trocaria nada.
+      force: true,
     });
   };
 

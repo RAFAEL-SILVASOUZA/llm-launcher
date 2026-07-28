@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { FolderPlus, Trash2, Save, Loader2, FolderOpen, AlertTriangle, Cpu, RotateCcw } from "lucide-react";
 import { api } from "../api/client";
+import type { ConfigurableBackend } from "../api/types";
 
 type Props = {
   onSaved: () => void;
@@ -8,12 +9,24 @@ type Props = {
 
 // mtp não aparece aqui: reusa o build do vanilla (MTP nativo no upstream), então
 // segue o diretório configurado pro vanilla — sem path próprio pra configurar.
-type BackendKey = "turbo" | "vanilla";
-const BACKEND_KEYS: BackendKey[] = ["turbo", "vanilla"];
+type BackendKey = ConfigurableBackend;
+const BACKEND_KEYS: BackendKey[] = ["turbo", "vanilla", "custom"];
+
+const EMPTY_DIRS: Record<BackendKey, string> = { turbo: "", vanilla: "", custom: "" };
 
 const BACKEND_LABEL: Record<BackendKey, string> = {
   turbo:   "turbo (turboquant)",
   vanilla: "vanilla (upstream + MTP nativo)",
+  custom:  "custom (build de um modelo)",
+};
+
+// O default do custom é só uma convenção de caminho — quase nunca existe. Sem
+// preencher isto, o backend custom aparece como "binário não compilado".
+const BACKEND_HINT: Partial<Record<BackendKey, string>> = {
+  custom:
+    "Aponte para o build que um modelo específico exige (fork com arch nova, " +
+    "patch de tokenizer…). Enquanto estiver vazio, o backend custom fica " +
+    "indisponível no editor de configuração.",
 };
 
 export function SettingsPage({ onSaved }: Props) {
@@ -22,15 +35,9 @@ export function SettingsPage({ onSaved }: Props) {
 
   // Diretórios por backend (turbo/vanilla). mtp segue o vanilla. Valor
   // vazio = usa o default exibido como placeholder.
-  const [backendDirs, setBackendDirs] = useState<Record<BackendKey, string>>({
-    turbo: "", vanilla: "",
-  });
-  const [originalBackendDirs, setOriginalBackendDirs] = useState<Record<BackendKey, string>>({
-    turbo: "", vanilla: "",
-  });
-  const [backendDefaults, setBackendDefaults] = useState<Record<BackendKey, string>>({
-    turbo: "", vanilla: "",
-  });
+  const [backendDirs, setBackendDirs] = useState<Record<BackendKey, string>>(EMPTY_DIRS);
+  const [originalBackendDirs, setOriginalBackendDirs] = useState<Record<BackendKey, string>>(EMPTY_DIRS);
+  const [backendDefaults, setBackendDefaults] = useState<Record<BackendKey, string>>(EMPTY_DIRS);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -45,7 +52,7 @@ export function SettingsPage({ onSaved }: Props) {
         setPaths(list);
         setOriginal(s.model_paths);
 
-        const cur: Record<BackendKey, string> = { turbo: "", vanilla: "" };
+        const cur: Record<BackendKey, string> = { ...EMPTY_DIRS };
         for (const k of BACKEND_KEYS) cur[k] = s.backend_paths[k] ?? "";
         setBackendDirs(cur);
         setOriginalBackendDirs(cur);
@@ -103,7 +110,7 @@ export function SettingsPage({ onSaved }: Props) {
       setOriginal(saved.model_paths);
       setPaths(saved.model_paths.length > 0 ? saved.model_paths : [""]);
 
-      const nextBackends: Record<BackendKey, string> = { turbo: "", vanilla: "" };
+      const nextBackends: Record<BackendKey, string> = { ...EMPTY_DIRS };
       for (const k of BACKEND_KEYS) nextBackends[k] = saved.backend_paths[k] ?? "";
       setBackendDirs(nextBackends);
       setOriginalBackendDirs(nextBackends);
@@ -226,6 +233,13 @@ export function SettingsPage({ onSaved }: Props) {
                 <div className="text-[11px] text-ink-500 pl-46 mono truncate" title={def}>
                   {usingDefault ? <>usando default: {def}</> : <>default: {def}</>}
                 </div>
+                {BACKEND_HINT[k] && (
+                  <div className={`text-[11px] pl-46 leading-snug ${
+                    usingDefault ? "text-amber-400/90" : "text-ink-500"
+                  }`}>
+                    {BACKEND_HINT[k]}
+                  </div>
+                )}
               </li>
             );
           })}

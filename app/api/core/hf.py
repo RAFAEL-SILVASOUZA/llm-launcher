@@ -292,6 +292,7 @@ def plan_download(
     rel_paths: list[str],
     subdir: str | None = None,
     base_root: Path | None = None,
+    force: bool = False,
 ) -> dict:
     """Devolve o plano: arquivos esperados + caminhos de destino + tamanhos.
 
@@ -302,6 +303,11 @@ def plan_download(
     Resolve `expected_size` via hf_list_files (endpoint tree?recursive=true),
     que devolve o tamanho real do blob LFS — o downloader usa pra validar
     integridade no fim. Falha silenciosa de tamanho => não rename.
+
+    `force` marca os itens pra re-baixar mesmo se já existirem com o tamanho
+    certo. É o caso do botão "Atualizar": o detector já comparou sha256 e sabe
+    que o conteúdo mudou; sem isso o downloader pularia por tamanho igual e o
+    "update" terminaria sem trocar byte nenhum.
     """
     owner, repo = repo_id.split("/", 1)
     root = base_root or MODELS_DIR
@@ -330,6 +336,7 @@ def plan_download(
             "size_disk":     dest.stat().st_size if dest.exists() else 0,
             "expected_size": sizes.get(rel, 0),
             "expected_oid":  oids.get(rel),
+            "force":         force,
             "url":           f"https://huggingface.co/{repo_id}/resolve/{branch}/{rel}?download=true",
         })
     return {
@@ -338,6 +345,18 @@ def plan_download(
         "base_dir": str(base_dir),
         "items":    items,
     }
+
+
+def skip_existing(actual: int, expected: int, force: bool = False) -> bool:
+    """O arquivo já em disco dispensa o download?
+
+    Só quando o tamanho bate (ou a API não devolveu tamanho — aí confia no
+    disco) E ninguém pediu `force`. Tamanho errado = truncado/desatualizado;
+    `force` = o caller já sabe por sha256 que o conteúdo divergiu.
+    """
+    if force:
+        return False
+    return expected == 0 or actual == expected
 
 
 def stream_download(plan: dict) -> Iterator[dict]:
@@ -358,21 +377,18 @@ def stream_download(plan: dict) -> Iterator[dict]:
         expected = int(it.get("expected_size") or 0)
         if dest.exists():
             actual = dest.stat().st_size
-            # Skip seguro: só pula se o tamanho bate (ou se a API não devolveu
-            # tamanho — aí confia no que está em disco). Se está em disco mas
-            # com tamanho errado, deleta e re-baixa — esse era o caso silencioso
-            # que deixava arquivo truncado pro llama-server engasgar depois.
-            if expected == 0 or actual == expected:
+            if skip_existing(actual, expected, bool(it.get("force"))):
                 yield {"type": "file_skip", "rel": rel, "dest": str(dest),
                        "reason": "already_exists", "size": actual}
                 continue
-            try:
-                dest.unlink()
-            except Exception:
-                pass
+            # Não apagamos o arquivo atual aqui: o download vai pro `.part` e só
+            # substitui o dest no fim (download_file_stream). Apagar antes trocava
+            # um arquivo velho por nenhum arquivo se o download falhasse no meio.
+            note = (f"arquivo em disco tem tamanho errado ({actual} != {expected}) — re-baixando"
+                    if expected and actual != expected
+                    else "re-baixando por cima (conteúdo divergiu do repositório)")
             yield {"type": "file_start", "rel": rel, "dest": str(dest),
-                   "index": idx, "total": total,
-                   "note": f"arquivo em disco tem tamanho errado ({actual} != {expected}) — re-baixando"}
+                   "index": idx, "total": total, "note": note}
         else:
             yield {"type": "file_start", "rel": rel, "dest": str(dest),
                    "index": idx, "total": total}

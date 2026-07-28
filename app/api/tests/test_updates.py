@@ -123,6 +123,39 @@ def test_infer_repo_id_not_under_any_root_is_none():
     assert updates.infer_repo_id(model, [root]) is None
 
 
+# ─── download_target ──────────────────────────────────────────────────────────
+
+def test_download_target_root_and_subdir():
+    # O endpoint remonta <root>/<owner>/<repo>/<subdir> — tem que dar na mesma
+    # pasta em que o modelo já está.
+    root = Path(r"D:\models")
+    model = root / "unsloth" / "Laguna-S-2.1-GGUF" / "Laguna-S-2.1-UD-Q2_K_XL" / "m.gguf"
+    assert updates.download_target(model, [root]) == (str(root), "Laguna-S-2.1-UD-Q2_K_XL")
+
+
+def test_download_target_without_subdir():
+    root = Path(r"D:\models")
+    model = root / "unsloth" / "repo" / "m.gguf"
+    assert updates.download_target(model, [root]) == (str(root), None)
+
+
+def test_download_target_nested_subdirs_joined():
+    root = Path(r"D:\models")
+    model = root / "owner" / "repo" / "a" / "b" / "m.gguf"
+    assert updates.download_target(model, [root]) == (str(root), "a/b")
+
+
+def test_download_target_outside_roots_is_none():
+    root = Path(r"D:\models")
+    model = Path(r"E:\other") / "owner" / "repo" / "m.gguf"
+    assert updates.download_target(model, [root]) == (None, None)
+
+
+def test_download_target_loose_in_root_is_none():
+    root = Path(r"D:\models")
+    assert updates.download_target(root / "loose.gguf", [root]) == (None, None)
+
+
 # ─── match_remote ─────────────────────────────────────────────────────────────
 
 def test_match_remote_by_basename():

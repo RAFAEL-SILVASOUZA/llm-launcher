@@ -24,6 +24,11 @@ LLAMA_CLI_VANILLA    = Path(r"C:\Projetos\llama-cpp\build\bin\Release\llama-cli.
 # MTP nativo no upstream (PR #22673) — fork am17an obsoleto, reusa o build vanilla.
 LLAMA_SERVER_MTP     = LLAMA_SERVER_VANILLA
 LLAMA_CLI_MTP        = LLAMA_CLI_VANILLA
+# custom: build de terceiro / fork exigido por um modelo específico. O path
+# abaixo é só a CONVENÇÃO (mesmo layout de CMake dos outros) — quem manda é o
+# diretório informado em Settings → "Diretórios dos binários llama.cpp".
+LLAMA_SERVER_CUSTOM  = Path(r"C:\Projetos\llama-cpp-custom\build\bin\Release\llama-server.exe")
+LLAMA_CLI_CUSTOM     = Path(r"C:\Projetos\llama-cpp-custom\build\bin\Release\llama-cli.exe")
 
 BACKENDS: dict[str, dict] = {
     "turbo": {
@@ -46,6 +51,17 @@ BACKENDS: dict[str, dict] = {
         "server":            LLAMA_SERVER_MTP,
         "cli":               LLAMA_CLI_MTP,
         "supports_spec_mtp": True,
+    },
+    # Sem identidade fixa: é o build que o usuário apontar. Por isso nada é
+    # assumido aqui — KV types saem do probe do --help do próprio binário e
+    # speculative MTP fica OFF (emitir --spec-type num fork desconhecido quebra
+    # o load, e o auto-degrade não sabe remover essa flag).
+    "custom": {
+        "label":             "custom",
+        "description":       "build/fork específico — caminho configurado em Settings",
+        "server":            LLAMA_SERVER_CUSTOM,
+        "cli":               LLAMA_CLI_CUSTOM,
+        "supports_spec_mtp": False,
     },
 }
 

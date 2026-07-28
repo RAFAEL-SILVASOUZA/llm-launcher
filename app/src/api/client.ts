@@ -9,6 +9,7 @@ import type {
   ActiveLaunch,
   AppSettings,
   BackendStatus,
+  ConfigurableBackend,
   DeletePlan,
   DeleteResult,
   Estimate,
@@ -236,10 +237,12 @@ export const api = {
     rel_paths: string[];
     subdir?: string | null;
     base_dir: string;
+    // "Atualizar": re-baixa por cima mesmo com tamanho igual (sha256 divergiu).
+    force?: boolean;
   }) =>
     jsonFetch<{ download_id: string; plan: HfDownloadPlan }>("/api/hf/download", {
       method: "POST",
-      body: JSON.stringify({ branch: "main", subdir: null, ...req }),
+      body: JSON.stringify({ branch: "main", subdir: null, force: false, ...req }),
     }),
   cancelDownload: (id: string) =>
     jsonFetch<{ ok: boolean }>(`/api/hf/download/${id}/cancel`, { method: "POST" }),
@@ -290,7 +293,7 @@ export const api = {
   // Só envia os campos editáveis — backend_paths_defaults é read-only.
   saveSettings: (settings: {
     model_paths: string[];
-    backend_paths: Partial<Record<"turbo" | "vanilla", string>>;
+    backend_paths: Partial<Record<ConfigurableBackend, string>>;
   }) =>
     jsonFetch<AppSettings>("/api/settings", {
       method: "POST",

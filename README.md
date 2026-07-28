@@ -72,13 +72,16 @@ cd C:\Users\SEU_USUARIO\llm
 
 ### 2.2 Clonar e compilar o llama.cpp
 
-O launcher **não traz o llama.cpp junto** — ele executa os binários `llama-server.exe` / `llama-cli.exe` que você compila. Ele conhece até três *backends* (builds diferentes):
+O launcher **não traz o llama.cpp junto** — ele executa os binários `llama-server.exe` / `llama-cli.exe` que você compila. Ele conhece quatro *backends* (builds diferentes):
 
 | Backend | O que é | Obrigatório? |
 |---|---|---|
 | `vanilla` | llama.cpp oficial (upstream), com os parsers de chat/tool mais novos e MTP nativo | ✅ **Sim — comece por ele** |
 | `mtp` | Não é um build separado: é o mesmo binário do `vanilla` lançado com `--spec-type draft-mtp` (decodificação especulativa para modelos com head MTP) | Vem de graça com o vanilla |
 | `turbo` | Fork customizado ("turboquant") com tipos extras de KV cache `turbo2/3/4` (compressão agressiva para contexto longo) | Opcional — se não tiver, use os KV padrão (`f16`, `q8_0`…) |
+| `custom` | **Qualquer outro build** — o fork que um modelo específico exige (arch nova ainda não mergeada, patch de tokenizer…). Não tem caminho fixo: você aponta a pasta dos binários em **Settings → Diretórios dos binários llama.cpp** (ou no menu Settings do CLI) e troca quando quiser experimentar outro | Opcional |
+
+Sobre o `custom`: nada é assumido sobre o build. Os tipos de KV cache oferecidos saem do `--help` do binário que você apontou (então um fork com KV próprio aparece com os tipos dele), e o *speculative MTP* fica desligado — emitir `--spec-type draft-mtp` num fork desconhecido quebra o load e o auto-degrade não sabe remover essa flag. Se o build for exigente quanto a flags, combine `custom` com o checkbox **"llama.cpp decide (comando mínimo)"**.
 
 **Passo a passo (build vanilla com CUDA):**
 
@@ -140,11 +143,11 @@ Existem dois lugares onde isso é definido:
 
 2. **Tela Settings da APP** (ou modo `settings` do CLI) — grava um `app_settings.json` compartilhado entre APP e CLI, com:
    - `model_paths`: lista de pastas varridas em busca de `.gguf`;
-   - `backend_paths`: pasta dos binários de cada backend (sobrescreve o default sem tocar no código).
+   - `backend_paths`: pasta dos binários de cada backend (sobrescreve o default sem tocar no código). É também como o backend `custom` ganha um caminho — ele não tem default utilizável.
 
    ![Tela Settings](telas/tela%20de%20configurações.png)
 
-   O que foi configurado na APP vale para o CLI e vice-versa — é o mesmo arquivo.
+   O que foi configurado na APP vale para o CLI e vice-versa — é o mesmo arquivo, inclusive para os `backend_paths`.
 
 > 📁 **Organização dos modelos:** o scanner procura `.gguf` recursivamente dentro das pastas cadastradas. A convenção `dono/repositorio/quant/arquivo.gguf` (a mesma do LM Studio e do download interno da APP) deixa a listagem mais legível.
 
@@ -208,7 +211,7 @@ Na faixa superior ficam as barras de **VRAM** e **RAM** em tempo real (atualizam
 
 - **Bolinha de status** (coluna `•`): estimativa de memória da config — 🟢 cabe na VRAM com folga, 🟡 apertado, 🔴 não cabe. Calculada em lote ao abrir a tela.
 - **Colunas**: backend, contexto (CTX), tipo de KV cache, camadas na GPU (`-ngl`), camadas MoE na CPU (`-ncmoe`), slots paralelos (`-np`), estado do thinking/reasoning e flag de visão (mmproj).
-- **Filtro e chips** no topo filtram por texto ou por backend (`todos / turbo / vanilla / mtp`).
+- **Filtro e chips** no topo filtram por texto ou por backend (`todos / turbo / vanilla / mtp / custom`).
 - **Ações por linha**: ✏️ editar, ⧉ duplicar, 🚀 **launch**, 🗑️ excluir.
 - **Checkboxes à esquerda + launch múltiplo (modo router)**: marque várias configs e suba todas de uma vez — o `llama-server` entra em modo router na porta única (1234) e o cliente escolhe o modelo pelo campo `model` da requisição. Só é permitido **um launch ativo por vez** (tentar outro retorna erro 409).
 - **+ nova** abre o editor com uma config em branco.
@@ -227,6 +230,7 @@ Abre ao criar/editar/duplicar uma config. À esquerda, os parâmetros; à direit
 Campos da primeira parte:
 
 - **Modelo (.gguf)** — dropdown com tudo que o scanner achou nas pastas configuradas.
+- **llama.cpp decide (comando mínimo)** — checkbox ao lado do dropdown. Marcado, o comando sai só com o modelo, o `--mmproj` (se houver), o `--alias` e o servidor HTTP (`--jinja --metrics --host --port`); **nenhuma** flag de tuning é emitida e o llama.cpp escolhe contexto, `-ngl`, KV, threads, samplers e reasoning sozinho. Os demais campos continuam salvos na config (aparecem esmaecidos) e voltam a valer assim que você desmarcar. Vale para o modo router também — a seção do preset fica só com o modelo. Em compensação, o [auto-degrade](#6-auto-degrade-o-que-acontece-quando-o-servidor-cai) fica desligado: sem flags nossas no comando, não há nada para baixar.
 - **Backend** — turboquant / vanilla / mtp (cards com descrição; desabilitado se o binário não existir).
 - **Context window** e **Slots paralelos (`-np`)** — o launcher emite `--kv-unified`, então o contexto é um **pool único** que os slots dividem (é o que o LM Studio faz por padrão): o KV custa `contexto × 1`, e não `× slots`. Uma request sozinha pode usar o pool inteiro; várias simultâneas disputam. Se o build não tiver a flag, o `-c` volta a ser multiplicado pelos slots para não encolher a janela em silêncio — e aí o KV custa `× slots` mesmo.
 - **KV cache (`--cache-type-k/v`)** — de `f16` (padrão) a quantizados (`q8_0`, `q4_0`…); os tipos `turbo2/3/4` só aparecem no backend turboquant.
@@ -324,7 +328,8 @@ Telemetria completa por GPU (via `nvidia-smi`), com **auto-refresh de 2 s**:
 Onde os caminhos são configurados (ver [seção 2.4](#24-configurar-os-caminhos)):
 
 - **Pastas de modelos** — adicione/remova quantas quiser; a aba Models revarre ao salvar. A primeira pasta é a sugerida como destino de download.
-- **Diretórios dos binários llama.cpp** — um campo por backend (turbo e vanilla; o mtp herda do vanilla). Vazio = usa o default do código; o texto `usando default: …` mostra qual é. O botão ↺ restaura o default.
+- **Diretórios dos binários llama.cpp** — um campo por backend (turbo, vanilla e custom; o mtp herda do vanilla). Vazio = usa o default do código; o texto `usando default: …` mostra qual é. O botão ↺ restaura o default. Informe a **pasta** que contém os `.exe`, não o executável.
+- O campo **custom** é o único cujo default não existe de fábrica: é onde você aponta o build específico de um modelo. Enquanto estiver vazio, o backend `custom` aparece no editor como *"sem caminho — configure em Settings"* e não pode ser lançado. O CLI lê o mesmo arquivo (menu **settings → 🧰 Diretórios dos binários llama.cpp**), então configurar num lado vale nos dois.
 
 ---
 
@@ -351,12 +356,13 @@ python models.py
 
 ### Modo `llama-server` (o principal)
 
-1. **Backend** — turbo / vanilla / mtp / dflash (só aparecem os que têm binário no caminho configurado; o CLI ainda suporta o backend experimental `dflash`, de decodificação especulativa com drafter GGUF separado, que não existe na APP).
+1. **Backend** — turbo / vanilla / mtp / custom / dflash (só aparecem os que têm binário no caminho configurado — inclusive o override de pasta feito em Settings; o CLI ainda suporta o backend experimental `dflash`, de decodificação especulativa com drafter GGUF separado, que não existe na APP).
 2. **Modelo** — lista tudo que foi achado nas pastas configuradas, marcando modelos com visão (🖼️).
 3. **Configuração salva?** — se você já rodou esse par modelo+backend antes, o CLI mostra a config anterior num quadro e pergunta se quer reutilizá-la. Respondendo **sim**, pula direto para o launch. As configs são as **mesmas da APP** (mesmo arquivo).
-4. Caso contrário, pergunta passo a passo: **context window**, **KV cache** (o CLI *sonda o binário* e só oferece os tipos que aquele build aceita), **flash attention**, **`-ngl`** (com sugestão automática baseada na VRAM livre e menu de estimativa por opção), **`-ncmoe`** para MoE, **split entre GPUs** quando há mais de uma, **slots paralelos**, **cache-ram**, **ctx-checkpoints**, **reasoning budget** (para modelos thinking), **max-tokens**, **batch/ubatch**, **mlock**, **verbose**.
-5. Antes de subir, imprime a **estimativa de memória** (as mesmas contas do painel da APP, com barras no terminal) e o **comando completo**.
-6. Executa com **launch resiliente**: monitora a saída, classifica falhas (OOM, KV rejeitado, flag desconhecida, GGUF corrompido…) e aplica o [auto-degrade](#6-auto-degrade-o-que-acontece-quando-o-servidor-cai) até o servidor estabilizar. A config que funcionou é salva para a próxima vez.
+4. Caso contrário, a primeira pergunta é **"deixar o llama.cpp decidir tudo?"** — respondendo **sim**, o CLI só pergunta mmproj e verbose e sobe com o comando mínimo (equivale ao checkbox da APP; nada de tuning entra na linha de comando e o auto-degrade fica desligado).
+5. Não sendo auto, pergunta passo a passo: **context window**, **KV cache** (o CLI *sonda o binário* e só oferece os tipos que aquele build aceita), **flash attention**, **`-ngl`** (com sugestão automática baseada na VRAM livre e menu de estimativa por opção), **`-ncmoe`** para MoE, **split entre GPUs** quando há mais de uma, **slots paralelos**, **cache-ram**, **ctx-checkpoints**, **reasoning budget** (para modelos thinking), **max-tokens**, **batch/ubatch**, **mlock**, **verbose**.
+6. Antes de subir, imprime a **estimativa de memória** (as mesmas contas do painel da APP, com barras no terminal) e o **comando completo**. No modo auto a estimativa é omitida — quem escolhe ctx/`-ngl`/KV ali é o llama.cpp, então qualquer número nosso seria chute.
+7. Executa com **launch resiliente**: monitora a saída, classifica falhas (OOM, KV rejeitado, flag desconhecida, GGUF corrompido…) e aplica o [auto-degrade](#6-auto-degrade-o-que-acontece-quando-o-servidor-cai) até o servidor estabilizar. A config que funcionou é salva para a próxima vez.
 
 ### Modo `llama-cli`
 
@@ -397,6 +403,7 @@ Regras importantes:
 
 - **A janela de contexto nunca é cortada** — o degrade sacrifica velocidade (mais coisas na CPU), não a capacidade que você pediu.
 - **GGUF corrompido não entra na escada** — é erro de download (shard faltando etc.); o runner desiste na hora e avisa, porque degradar não conserta arquivo quebrado.
+- **Config com "llama.cpp decide" também não** — nenhuma flag nossa vai no comando, então todo degrau geraria a mesma linha e o restart viraria loop; o runner para na primeira queda e mostra o erro.
 - Cada tentativa aparece numerada no modal de logs da APP (ou no terminal, no CLI), e a config final que funcionou é a que fica salva.
 
 ---

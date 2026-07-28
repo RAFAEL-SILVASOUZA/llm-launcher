@@ -3,9 +3,10 @@
 Guarda hoje:
   - `model_paths`: pastas para varrer .gguf (fallback: MODELS_DIR).
   - `backend_paths`: override do diretório dos binários por backend
-    (turbo/vanilla/mtp). Quando vazio/ausente, cai pro hardcoded default em
+    (turbo/vanilla/custom). Quando vazio/ausente, cai pro hardcoded default em
     constants.BACKENDS — pra que o app continue funcionando se o usuário
-    nunca configurou.
+    nunca configurou. No backend `custom` esse override é a única fonte real:
+    o default é só uma convenção de caminho e normalmente não existe.
 """
 from __future__ import annotations
 

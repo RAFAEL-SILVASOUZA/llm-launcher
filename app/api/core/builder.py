@@ -39,6 +39,57 @@ def _multi_gpu_flags(
     return out
 
 
+def build_auto_server_command(
+    model_path: Path,
+    backend:    str,
+    mmproj:     Path | None = None,
+    verbose:    bool = False,
+    host:       str = "0.0.0.0",
+    port:       int = 1234,
+) -> str:
+    """Comando MÍNIMO — o modo "llama.cpp decide" (cfg["llama_auto"]).
+
+    Só entra o que identifica o modelo (-m/--mmproj/--alias) e o que serve o
+    HTTP (--jinja/--metrics/--host/--port). Nenhuma flag de tuning: contexto,
+    -ngl, KV, threads, batch, samplers, reasoning e speculative ficam nos
+    defaults do próprio llama.cpp, que decide tudo a partir do GGUF e da
+    máquina. É a saída de emergência pra quando o nosso palpite atrapalha.
+    """
+    server_bin = backend_binary(backend, "server")
+    if not server_bin.exists():
+        raise BackendBinaryMissing(f"llama-server não encontrado em: {server_bin}")
+
+    cmd = f'"{server_bin}" -m "{model_path}"'
+    if mmproj:
+        cmd += f' --mmproj "{mmproj}"'
+    cmd += f' --alias "{make_alias(model_path)}"'
+    cmd += f' --jinja --metrics --host {host} --port {port}'
+    if verbose:
+        cmd += ' --verbose'
+    return cmd
+
+
+def build_auto_cli_command(
+    model_path: Path,
+    backend:    str,
+    mmproj:     Path | None = None,
+    verbose:    bool = False,
+) -> str:
+    """Equivalente do modo auto pro llama-cli: modelo + --conversation (é o que
+    torna o CLI interativo, não é tuning). O resto é default do llama.cpp."""
+    cli_bin = backend_binary(backend, "cli")
+    if not cli_bin.exists():
+        raise BackendBinaryMissing(f"llama-cli não encontrado em: {cli_bin}")
+
+    cmd = f'"{cli_bin}" -m "{model_path}"'
+    if mmproj:
+        cmd += f' --mmproj "{mmproj}"'
+    cmd += ' --conversation'
+    if verbose:
+        cmd += ' --verbose'
+    return cmd
+
+
 def build_server_command(
     model_path:       Path,
     backend:          str,
@@ -242,6 +293,14 @@ def _router_section_lines(cfg: dict) -> list[str]:
     if mmproj:
         add("mmproj", str(Path(mmproj)))
 
+    # Modo auto (checkbox "llama.cpp decide"): a seção fica só com o modelo —
+    # o filho sobe com os defaults do llama.cpp, igual ao launch único.
+    if cfg.get("llama_auto", False):
+        if cfg.get("verbose", False):
+            add("verbose", "true")
+        add("load-on-startup", "true")
+        return lines
+
     # ctx-size/kv-unified: mesma regra do build_server_command — com pool
     # compartilhado o ctx não multiplica pelos slots.
     parallel = cfg.get("parallel_slots", 1)
@@ -383,6 +442,16 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
     mmproj_str = cfg.get("mmproj")
     mmproj = Path(mmproj_str) if mmproj_str else None
     model_path = Path(cfg["model"])
+
+    # Modo auto: nenhuma outra chave da config vira flag (elas continuam
+    # salvas — desmarcar o checkbox devolve a config completa intacta).
+    if cfg.get("llama_auto", False):
+        backend = cfg.get("backend", "turbo")
+        verbose = cfg.get("verbose", False)
+        if mode == "server":
+            return build_auto_server_command(model_path, backend, mmproj, verbose)
+        return build_auto_cli_command(model_path, backend, mmproj, verbose)
+
     sampler = sampling.resolve(model_path, cfg)
     if mode == "server":
         return build_server_command(
