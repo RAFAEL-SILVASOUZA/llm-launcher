@@ -271,6 +271,13 @@ Inventário de tudo que o scanner encontrou nas pastas configuradas:
 - **Flags** detectadas pelos metadados do GGUF: 🧠 thinking/reasoning, ⚡ MTP, 🖼️ visão (mmproj);
 - **delete** remove o `.gguf` do disco (e o mmproj associado), com confirmação e limpeza de pastas vazias.
 
+A head MTP pode vir de dois jeitos, e o app trata os dois sozinho:
+
+- **embutida** no gguf do modelo (repos tipo `Qwen3.6-27B-MTP-GGUF`) — basta o `--spec-type draft-mtp`;
+- **em gguf separado**, numa pasta irmã com prefixo `mtp-` (`Tess-4-27B-GGUF/{Tess-4-27B-Q8_0, mtp-Tess-4-27B-Q8_0}`) — aí o comando ganha também `-md <caminho da head>`, sem o qual o llama.cpp montaria o contexto MTP em cima do modelo alvo, que não tem essa camada.
+
+O drafter não aparece na lista de modelos (sozinho ele não roda: é uma camada só), pesa na estimativa de VRAM como um segundo modelo (~3 GB num 27B q8_0) e é apagado junto com o alvo no **delete**.
+
 O campo **filtrar…** busca por nome/caminho.
 
 #### Aba Download

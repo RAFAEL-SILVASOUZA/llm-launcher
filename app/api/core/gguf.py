@@ -55,6 +55,101 @@ _OUTPUT_RE       = re.compile(r"^output\.weight$", re.IGNORECASE)
 _BLOCK_RE        = re.compile(r"^blk\.(\d+)\.", re.IGNORECASE)
 
 _GGUF_META_CACHE: dict[str, dict] = {}
+_MMPROJ_META_CACHE: dict[str, dict] = {}
+
+
+def _read_value(f, vtype: int):
+    """Um valor da seção KV do GGUF, no tipo declarado pelo header."""
+    if vtype == 0:  return f.read(1)[0]
+    if vtype == 1:  return struct.unpack("<b", f.read(1))[0]
+    if vtype == 2:  return struct.unpack("<H", f.read(2))[0]
+    if vtype == 3:  return struct.unpack("<h", f.read(2))[0]
+    if vtype == 4:  return struct.unpack("<I", f.read(4))[0]
+    if vtype == 5:  return struct.unpack("<i", f.read(4))[0]
+    if vtype == 6:  return struct.unpack("<f", f.read(4))[0]
+    if vtype == 7:  return bool(f.read(1)[0])
+    if vtype == 10: return struct.unpack("<Q", f.read(8))[0]
+    if vtype == 11: return struct.unpack("<q", f.read(8))[0]
+    if vtype == 12: return struct.unpack("<d", f.read(8))[0]
+    if vtype == 8:
+        sl = struct.unpack("<Q", f.read(8))[0]
+        return f.read(sl).decode("utf-8", errors="replace")
+    if vtype == 9:
+        et = struct.unpack("<I", f.read(4))[0]
+        n  = struct.unpack("<Q", f.read(8))[0]
+        # Coleta arrays curtos de escalares (head_count_kv por camada, patterns).
+        # Vocabs/tokens são gigantes — só consome pra andar o cursor.
+        if n <= 4096 and et in (0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12):
+            return [_read_value(f, et) for _ in range(n)]
+        for _ in range(n):
+            _read_value(f, et)
+        return None
+    raise ValueError(f"unknown GGUF type {vtype}")
+
+
+def _read_kv_block(f) -> tuple[dict, int]:
+    """Header + seção KV inteira. Deixa o cursor no início do tensor_info e
+    devolve (kv, n_tensors). Levanta se o arquivo não é GGUF."""
+    if f.read(4) != b"GGUF":
+        raise ValueError("not a GGUF file")
+    f.read(4)                                                  # version
+    n_tensors = struct.unpack("<Q", f.read(8))[0]
+    kv_count  = struct.unpack("<Q", f.read(8))[0]
+    kv: dict = {}
+    for _ in range(kv_count):
+        klen  = struct.unpack("<Q", f.read(8))[0]
+        k_str = f.read(klen).decode("utf-8", errors="replace")
+        vtype = struct.unpack("<I", f.read(4))[0]
+        kv[k_str] = _read_value(f, vtype)
+    return kv, n_tensors
+
+
+def read_mmproj_meta(mmproj_path: Path) -> dict | None:
+    """Metadados do projector multimodal (mmproj). Devolve None se não parseou.
+
+    read_meta() não serve aqui: o mmproj tem `general.architecture = clip` e
+    guarda as dimensões em `clip.vision.*`, então cai fora nas checagens de
+    n_layer/n_embd. Aqui só interessam duas coisas — o tipo do projector
+    (`clip.projector_type`: qwen3vl_merger, gemma3, pixtral…), que é o que diz
+    a QUAL família de flags de imagem o modelo responde, e se tem torre de
+    visão. Lê só a seção KV; não percorre tensor_info.
+    """
+    key = str(mmproj_path)
+    if key in _MMPROJ_META_CACHE:
+        return _MMPROJ_META_CACHE[key] or None
+
+    try:
+        with open(mmproj_path, "rb") as f:
+            raw, _ = _read_kv_block(f)
+    except Exception:
+        _MMPROJ_META_CACHE[key] = {}
+        return None
+
+    # A chave canônica é `clip.projector_type`, mas conversores mais antigos
+    # gravaram sob `clip.vision.projector_type` (o mmproj do Gemma 4 é assim).
+    proj = raw.get("clip.projector_type") or raw.get("clip.vision.projector_type")
+    meta = {
+        "projector_type": str(proj) if proj else None,
+        "has_vision":     bool(raw.get("clip.has_vision_encoder", False)),
+        "has_audio":      bool(raw.get("clip.has_audio_encoder", False)),
+    }
+    _MMPROJ_META_CACHE[key] = meta
+    return meta
+
+
+def _coerce_int(value, default: int = 0) -> int:
+    """Converte um valor escalar do GGUF (ou array curto de escalares) para int.
+
+    `expert_used_count` em quantos MoE recentes é gravado como array (um valor
+    por expert, tipo 9 da KV), então `_read_value` devolve uma lista. Arrays são
+    somados para manter o contrato de escalar usado pelo estimador de memória e
+    pelo frontend; valores ausentes ou nulos viram `default`.
+    """
+    if value is None:
+        return default
+    if isinstance(value, list):
+        return sum(int(x) for x in value)
+    return int(value or default)
 
 
 def read_meta(model_path: Path) -> dict | None:
@@ -79,43 +174,7 @@ def read_meta(model_path: Path) -> dict | None:
 
     try:
         with open(model_path, "rb") as f:
-            if f.read(4) != b"GGUF":
-                _GGUF_META_CACHE[key] = {}
-                return None
-            f.read(4)                                              # version
-            n_tensors = struct.unpack("<Q", f.read(8))[0]
-            kv_count  = struct.unpack("<Q", f.read(8))[0]
-
-            def read_value(vtype: int):
-                if vtype == 0:  return f.read(1)[0]
-                if vtype == 1:  return struct.unpack("<b", f.read(1))[0]
-                if vtype == 2:  return struct.unpack("<H", f.read(2))[0]
-                if vtype == 3:  return struct.unpack("<h", f.read(2))[0]
-                if vtype == 4:  return struct.unpack("<I", f.read(4))[0]
-                if vtype == 5:  return struct.unpack("<i", f.read(4))[0]
-                if vtype == 6:  return struct.unpack("<f", f.read(4))[0]
-                if vtype == 7:  return bool(f.read(1)[0])
-                if vtype == 10: return struct.unpack("<Q", f.read(8))[0]
-                if vtype == 11: return struct.unpack("<q", f.read(8))[0]
-                if vtype == 12: return struct.unpack("<d", f.read(8))[0]
-                if vtype == 8:
-                    sl = struct.unpack("<Q", f.read(8))[0]
-                    return f.read(sl).decode("utf-8", errors="replace")
-                if vtype == 9:
-                    et = struct.unpack("<I", f.read(4))[0]
-                    n  = struct.unpack("<Q", f.read(8))[0]
-                    if n <= 4096 and et in (0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12):
-                        return [read_value(et) for _ in range(n)]
-                    for _ in range(n):
-                        read_value(et)
-                    return None
-                raise ValueError(f"unknown GGUF type {vtype}")
-
-            for _ in range(kv_count):
-                key_len = struct.unpack("<Q", f.read(8))[0]
-                k_str = f.read(key_len).decode("utf-8", errors="replace")
-                vtype = struct.unpack("<I", f.read(4))[0]
-                raw[k_str] = read_value(vtype)
+            raw, n_tensors = _read_kv_block(f)
 
             for _ in range(n_tensors):
                 nl = struct.unpack("<Q", f.read(8))[0]
@@ -201,8 +260,8 @@ def read_meta(model_path: Path) -> dict | None:
     else:
         n_kv_norm = int(n_kv)
 
-    expert_count        = int(g("expert_count", 0) or 0)
-    expert_used_count   = int(g("expert_used_count", 0) or 0)
+    expert_count        = _coerce_int(g("expert_count", 0))
+    expert_used_count   = _coerce_int(g("expert_used_count", 0))
     moe_layers_count    = len(moe_per_layer_bytes)
     moe_per_layer_mib   = 0
     if moe_layers_count:

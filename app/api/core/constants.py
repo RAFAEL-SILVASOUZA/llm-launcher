@@ -73,6 +73,21 @@ BACKEND_BINARY_ALIAS = {"mtp": "vanilla"}
 
 THINKING_KEYWORDS = {"qwen3", "qwq", "deepseek-r1", "thinking", "reasoning", "gemma-4", "gemma4"}
 
+# --cors-origins: o default do llama-server é "*" e, sem --api-key, ele avisa no
+# boot que qualquer site aberto no navegador pode chamar a API (PR #25655).
+# "localhost" é um valor ESPECIAL: o server reflete o header Origin só quando ele
+# é localhost/127.0.0.1 — a UI do app (localhost:5174) e a Web UI do próprio
+# llama-server continuam funcionando, e clientes não-navegador (Claude Code,
+# curl, outra máquina da LAN) não mandam Origin, então nada muda pra eles.
+# Trocar por "*" (ou por uma origem específica) via cfg["cors_origins"] quando
+# for preciso liberar um front hospedado em outro host.
+DEFAULT_CORS_ORIGINS = "localhost"
+
+# --image-min-tokens pra projectors Qwen-VL: abaixo de 1024 tokens por imagem o
+# próprio clip.cpp avisa que grounding degrada (issue #16842). Custa prefill —
+# só entra quando o mmproj é mesmo Qwen-VL (ver is_qwen_vl_mmproj).
+IMAGE_MIN_TOKENS_QWEN_VL = 1_024
+
 MMPROJ_ERROR_PATTERNS = (
     "unsupported decoder rope type",
     "failed to load multimodal model",

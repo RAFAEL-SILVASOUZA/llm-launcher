@@ -13,6 +13,19 @@ import questionary
 # servido pra modelo de raciocínio: duas cópias, uma só foi corrigida.
 sys.path.insert(0, str(Path(__file__).parent / "app"))
 from api.core import sampling as sampling_core  # noqa: E402
+# Idem pra localização da head MTP em gguf separado (pasta irmã 'mtp-<quant>/'):
+# a regra de pareamento é a mesma do app, então mora num lugar só.
+from api.core.models_repo import (  # noqa: E402
+    find_mtp_draft,
+    is_external_mtp_draft,
+    is_qwen_vl_mmproj,
+)
+# Política de CORS e mínimo de tokens por imagem: constantes compartilhadas com o
+# app pelo mesmo motivo (uma cópia só).
+from api.core.constants import (  # noqa: E402
+    DEFAULT_CORS_ORIGINS,
+    IMAGE_MIN_TOKENS_QWEN_VL,
+)
 
 MODELS_DIR  = Path(r"D:\models")
 
@@ -675,6 +688,9 @@ def collect_models() -> list[Path]:
         # Drafter do DFlash (-md) é arquivo auxiliar, não um alvo selecionável.
         if _DFLASH_DRAFTER_RE.search(low):
             return False
+        # Idem a head MTP publicada à parte (pasta irmã 'mtp-<quant>/').
+        if is_external_mtp_draft(f):
+            return False
         m = _SPLIT_RE.match(f.name)
         return not m or m.group("part") == "00001"
 
@@ -717,10 +733,26 @@ def is_mtp_model(model_path: Path) -> bool:
     que fica DOIS níveis acima do .gguf — o download grava em
     owner/repo/<quant>/arquivo.gguf, então nem o nome nem o parent imediato
     carregam 'MTP'. Varrer todos os parents cobre esse layout.
+
+    Cobre também a head empacotada à parte (pasta irmã 'mtp-<quant>/'), que não
+    deixa rastro nenhum no caminho do modelo — quem acha é find_mtp_draft.
     """
     pattern = re.compile(r"(?:^|[-_.])mtp(?:[-_.]|$)", re.IGNORECASE)
     parts = [model_path.name, *(p.name for p in model_path.parents)]
-    return any(pattern.search(part) for part in parts)
+    if any(pattern.search(part) for part in parts):
+        return True
+    return find_mtp_draft(model_path) is not None
+
+
+def spec_mtp_flags(model_path: Path, spec_draft_n_max: int) -> str:
+    """Flags de speculative MTP — head embutida no gguf do alvo só precisa do
+    --spec-type; head em gguf SEPARADO precisa também do -md apontando pra ela,
+    senão o loader não a encontra e o rascunho nunca acontece."""
+    out = f' --spec-type draft-mtp --spec-draft-n-max {spec_draft_n_max}'
+    draft = find_mtp_draft(model_path)
+    if draft is not None:
+        out += f' -md "{draft}"'
+    return out
 
 
 # Drafter do DFlash: GGUF separado, nomeado tipo 'dflash-draft-3.6-q8_0.gguf'.
@@ -962,6 +994,14 @@ def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | No
         if flag == "--chat-template-kwargs" and cfg.get("preserve_thinking"):
             cfg["preserve_thinking"] = False
             return cfg, "removido --chat-template-kwargs (build não suporta)"
+        if flag == "--cors-origins" and cfg.get("cors_origins", DEFAULT_CORS_ORIGINS):
+            # Volta pro default "*" do llama.cpp: o server sobe (só com o aviso
+            # de CORS aberto no log), que é melhor que não subir.
+            cfg["cors_origins"] = ""
+            return cfg, "removido --cors-origins (build não suporta) — CORS volta a ser '*'"
+        if flag == "--image-min-tokens" and cfg.get("image_min_tokens") != 0:
+            cfg["image_min_tokens"] = 0
+            return cfg, "removido --image-min-tokens (build não suporta)"
         # Sem -kvu o build_command volta a multiplicar o -c pelos slots, senão o
         # llama.cpp repartiria o contexto e cortaria a janela em silêncio. O
         # preço é KV × slots — se não couber, a escada continua daqui.
@@ -1042,10 +1082,15 @@ def _build_cmd_from_cfg(cfg: dict) -> str:
     """Reconstrói a cmd do llama-server a partir de uma config (possivelmente
     degradada) — usado entre tentativas sem voltar pra UI."""
     mmproj = cfg.get("mmproj")
+    # Nenhuma das duas aparece na UI: cors_origins é a válvula pra liberar um
+    # front fora de localhost; image_min_tokens é o degrau do auto-degrade.
+    cors_origins     = cfg.get("cors_origins", DEFAULT_CORS_ORIGINS)
+    image_min_tokens = cfg.get("image_min_tokens")
     if cfg.get("llama_auto", False):
         return build_auto_command(
             Path(cfg["model"]), cfg.get("backend", "turbo"),
             Path(mmproj) if mmproj else None, cfg.get("verbose", False),
+            cors_origins=cors_origins,
         )
     return build_command(
         model_path=Path(cfg["model"]),
@@ -1074,6 +1119,8 @@ def _build_cmd_from_cfg(cfg: dict) -> str:
         split_mode=cfg.get("split_mode"),
         tensor_split=cfg.get("tensor_split"),
         main_gpu=cfg.get("main_gpu"),
+        cors_origins=cors_origins,
+        image_min_tokens=image_min_tokens,
     )
 
 
@@ -2287,6 +2334,17 @@ def _gguf_meta(model_path: Path) -> dict | None:
         v = raw.get(f"{arch}.{name}")
         return default if v is None else v
 
+    def _coerce_int(value, default: int = 0) -> int:
+        # expert_used_count em quantos MoE recentes é gravado como array (um
+        # valor por expert, tipo 9 da KV), então read_value devolve uma lista.
+        # Arrays são somados pra manter o contrato de escalar usado pelo
+        # estimador e pelo frontend.
+        if value is None:
+            return default
+        if isinstance(value, list):
+            return sum(int(x) for x in value)
+        return int(value or default)
+
     n_layer = g("block_count")
     n_embd  = g("embedding_length")
     n_head  = g("attention.head_count")
@@ -2330,8 +2388,8 @@ def _gguf_meta(model_path: Path) -> dict | None:
     # MoE: expert_count > 0 marca o modelo. moe_per_layer_mib é o peso médio
     # dos tensores `ffn_*_exps` em cada camada com experts — não inclui
     # gates/normas/atenção, só o que o llama.cpp realmente offloada com -ncmoe.
-    expert_count        = int(g("expert_count", 0) or 0)
-    expert_used_count   = int(g("expert_used_count", 0) or 0)
+    expert_count        = _coerce_int(g("expert_count", 0))
+    expert_used_count   = _coerce_int(g("expert_used_count", 0))
     moe_layers_count    = len(moe_per_layer_bytes)
     moe_per_layer_mib   = 0
     if moe_layers_count:
@@ -2751,10 +2809,17 @@ def estimate_memory(
     # criado quando o backend mtp encontra um modelo MTP. Vive sempre na GPU.
     vram_mtp_kv      = 0
     vram_mtp_compute = 0
+    vram_mtp_weights = 0
     if (meta and gpu_active and backend == "mtp"
             and is_mtp_model(model_path)):
         vram_mtp_kv      = _mtp_draft_kv_mib(meta, context_window, bytes_pe_k, bytes_pe)
         vram_mtp_compute = _MTP_DRAFT_COMPUTE_MIB
+        # Head embutida já pesa dentro do gguf do alvo; a empacotada à parte é um
+        # SEGUNDO modelo carregado via -md (token_embd + output + o bloco MTP —
+        # ~3 GB num 27B q8_0) e precisa entrar na conta.
+        _mtp_draft_path = find_mtp_draft(model_path)
+        if _mtp_draft_path is not None:
+            vram_mtp_weights = int(_model_disk_size_mib(_mtp_draft_path) * _WEIGHT_OVERHEAD)
 
     # DFlash: drafter GGUF separado (-md) + segundo contexto pequeno, ambos na
     # GPU. Pesos dominam; KV do rascunho (256 tokens) e cross-attention cabem no
@@ -2801,6 +2866,7 @@ def estimate_memory(
         "vram_mmproj_compute":  vram_mmproj_compute,
         "vram_mtp_kv":      vram_mtp_kv,
         "vram_mtp_compute": vram_mtp_compute,
+        "vram_mtp_weights": vram_mtp_weights,
         "vram_dflash_weights": vram_dflash_weights,
         "vram_dflash_compute": vram_dflash_compute,
         "ram_weights":      ram_weights,
@@ -2809,7 +2875,7 @@ def estimate_memory(
         "cache_ram":        cache_ram_mib,
         "moe_offload_mib":  moe_offload_mib,
         "vram_total":       (vram_weights + vram_kv + vram_compute + vram_ssm
-                             + vram_mmproj + vram_mtp_kv + vram_mtp_compute
+                             + vram_mmproj + vram_mtp_kv + vram_mtp_compute + vram_mtp_weights
                              + vram_dflash_weights + vram_dflash_compute),
         "ram_total":        ram_weights + ram_kv + ram_ssm,
         "vram_avail":       _gpu_free_mib(),
@@ -2897,7 +2963,7 @@ def show_memory_estimate(
         moe_note = f" (ncmoe offload: {est['moe_offload_mib']} MiB)" if est.get("moe_offload_mib") else ""
         ssm_note = f" + ssm {est['vram_ssm']}" if est.get("vram_ssm") else ""
         mtp_note = (
-            f" + mtp-draft {est['vram_mtp_kv'] + est['vram_mtp_compute']}"
+            f" + mtp-draft {est['vram_mtp_kv'] + est['vram_mtp_compute'] + est.get('vram_mtp_weights', 0)}"
             if est.get("vram_mtp_kv") or est.get("vram_mtp_compute") else ""
         )
         dflash_note = (
@@ -3134,11 +3200,53 @@ def _multi_gpu_flags(
     return out
 
 
+def _image_min_tokens(
+    mmproj:   Path | None,
+    backend:  str,
+    mode:     str = "server",
+    override: int | None = None,
+) -> int | None:
+    """Valor de --image-min-tokens, ou None quando a flag não deve entrar.
+
+    O clip.cpp avisa no load que projector Qwen-VL abaixo de 1024 tokens por
+    imagem erra tarefas de grounding (issue #16842). Quem responde é o tipo do
+    projector no gguf do mmproj, não o nome do modelo.
+    `override`: None = decide pelo projector; 0 = desligado (degrau do
+    auto-degrade); >0 = valor explícito.
+    """
+    if mmproj is None or override == 0:
+        return None
+    tokens = override
+    if tokens is None:
+        if not is_qwen_vl_mmproj(mmproj):
+            return None
+        tokens = IMAGE_MIN_TOKENS_QWEN_VL
+    if not _backend_supports_flag("--image-min-tokens", backend, mode):
+        return None
+    return tokens
+
+
+def _cors_flags(cors_origins: str | None, backend: str) -> str:
+    """--cors-origins. Sem isso o llama-server sobe com "*" e avisa no boot que
+    qualquer site aberto no navegador pode chamar a API sem API key (PR #25655).
+    "localhost" é valor especial: reflete o Origin só quando é localhost, e
+    cliente não-navegador (agente, curl, outra máquina) não manda Origin —
+    então nada muda pra eles."""
+    origins = (cors_origins or "").strip()
+    if not origins:
+        return ""
+    if not _backend_supports_flag("--cors-origins", backend, "server"):
+        return ""
+    # Aspas: o valor pode ser "*" ou uma lista separada por vírgula.
+    return f' --cors-origins "{origins}"'
+
+
 def build_auto_command(
     model_path: Path,
     backend:    str,
     mmproj:     Path | None = None,
     verbose:    bool = False,
+    cors_origins: str | None = DEFAULT_CORS_ORIGINS,
 ) -> str:
     """Comando MÍNIMO do llama-server — o modo "llama.cpp decide" (llama_auto).
 
@@ -3159,6 +3267,9 @@ def build_auto_command(
         cmd += f' --mmproj "{mmproj}"'
     cmd += f' --alias "{make_alias(model_path)}"'
     cmd += ' --jinja --metrics --host 0.0.0.0 --port 1234'
+    # --cors-origins entra até no modo auto: não é tuning, é a porta de entrada
+    # HTTP — e o default "*" do llama.cpp abre a API pra qualquer site.
+    cmd += _cors_flags(cors_origins, backend)
     if verbose:
         cmd += ' --verbose'
     return cmd
@@ -3214,6 +3325,8 @@ def build_command(
     split_mode:       str | None = None,
     tensor_split:     str | None = None,
     main_gpu:         int | None = None,
+    cors_origins:     str | None = DEFAULT_CORS_ORIGINS,
+    image_min_tokens: int | None = None,
 ) -> str:
     alias = make_alias(model_path)
     server_bin = backend_binary(backend, "server")
@@ -3232,6 +3345,9 @@ def build_command(
 
     if mmproj:
         cmd += f' --mmproj "{mmproj}"'
+        img_tokens = _image_min_tokens(mmproj, backend, "server", image_min_tokens)
+        if img_tokens:
+            cmd += f' --image-min-tokens {img_tokens}'
 
     # -c no llama-server é o KV cache TOTAL, repartido entre os -np slots. Com
     # -kvu ele não reparte (n_ctx_seq = n_ctx): os slots dividem um pool só, e
@@ -3294,7 +3410,7 @@ def build_command(
         cmd += ' --mlock'
 
     if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
-        cmd += f' --spec-type draft-mtp --spec-draft-n-max {spec_draft_n_max}'
+        cmd += spec_mtp_flags(model_path, spec_draft_n_max)
 
     # DFlash: drafter GGUF separado na GPU (-md/-ngld). --spec-dflash-default é o
     # preset do fork buun (liga spec-type dflash + tuning n_max=7/p_min=0; exige
@@ -3312,6 +3428,7 @@ def build_command(
     cmd += f' --ctx-checkpoints {ctx_checkpoints}'
 
     cmd += ' --jinja --metrics --host 0.0.0.0 --port 1234'
+    cmd += _cors_flags(cors_origins, backend)
 
     if verbose:
         cmd += ' --verbose'
@@ -3340,6 +3457,7 @@ def build_cli_command(
     split_mode:       str | None = None,
     tensor_split:     str | None = None,
     main_gpu:         int | None = None,
+    image_min_tokens: int | None = None,
 ) -> str:
     cli_bin = backend_binary(backend, "cli")
 
@@ -3356,6 +3474,9 @@ def build_cli_command(
 
     if mmproj:
         cmd += f' --mmproj "{mmproj}"'
+        img_tokens = _image_min_tokens(mmproj, backend, "cli", image_min_tokens)
+        if img_tokens:
+            cmd += f' --image-min-tokens {img_tokens}'
 
     cmd += f' -c {context_window}'
     cmd += f' -ngl {gpu_layers}'
@@ -3387,7 +3508,7 @@ def build_cli_command(
         cmd += ' --mlock'
 
     if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
-        cmd += f' --spec-type draft-mtp --spec-draft-n-max {spec_draft_n_max}'
+        cmd += spec_mtp_flags(model_path, spec_draft_n_max)
 
     if BACKENDS[backend].get("supports_spec_dflash") and spec_dflash_draft and Path(spec_dflash_draft).exists():
         cmd += f' -md "{spec_dflash_draft}" --spec-dflash-default -ngld 99'
@@ -4070,7 +4191,9 @@ def main():
         else:
             print(f"   n: {max_tokens}  |  {img_status}  |  {verbose_status}")
         if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
-            print(f"   spec-mtp: draft-mtp  |  spec-draft-n-max: {spec_draft_n_max}")
+            _mtp_draft = find_mtp_draft(model_path)
+            _md_str = f"  |  -md: {_mtp_draft.name}" if _mtp_draft else ""
+            print(f"   spec-mtp: draft-mtp  |  spec-draft-n-max: {spec_draft_n_max}{_md_str}")
         if BACKENDS[backend].get("supports_spec_dflash") and spec_dflash_draft:
             print(f"   spec-dflash: {Path(spec_dflash_draft).name}  (--spec-dflash-default)")
         if preserve_thinking:

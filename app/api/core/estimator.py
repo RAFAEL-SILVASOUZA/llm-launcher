@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .backends import kv_unified_active, remap_kv_for_backend
 from .gguf import read_meta
-from .models_repo import is_mtp_model, model_disk_size_mib
+from .models_repo import find_mtp_draft, is_mtp_model, model_disk_size_mib
 from .nvidia import gpu_free_mib, gpu_total_mib, ram_total_mib
 
 _MIB = 1024 * 1024
@@ -80,6 +80,26 @@ def _mtp_draft_kv_mib(meta: dict, ctx: int,
     h_k  = meta["head_dim_k"]
     h_v  = meta["head_dim_v"]
     return int(n_kv * (h_k * bytes_pe_k + h_v * bytes_pe_v) * ctx / _MIB)
+
+
+def _mtp_draft_weights_mib(model_path: Path) -> int:
+    """Pesos da head MTP quando ela vem em gguf SEPARADO (-md).
+
+    Head embutida já está contabilizada no arquivo do modelo — aqui é só o caso
+    do drafter externo, que o llama.cpp carrega como um segundo modelo inteiro
+    (token_embd + output + o bloco MTP; ~3 GB num 27B q8_0). Ignorar isso
+    subestimava a VRAM e fazia o fit escolher um contexto que dava OOM.
+    """
+    draft = find_mtp_draft(model_path)
+    if draft is None:
+        return 0
+    meta = read_meta(draft)
+    if meta and meta.get("tensor_total_mib"):
+        return int(meta["tensor_total_mib"])
+    try:
+        return int(draft.stat().st_size / _MIB)
+    except OSError:
+        return 0
 
 
 def _split_weights_by_ngl(
@@ -220,10 +240,12 @@ def estimate_memory(
 
     vram_mtp_kv      = 0
     vram_mtp_compute = 0
+    vram_mtp_weights = 0
     if (meta and gpu_active and backend == "mtp"
             and is_mtp_model(model_path)):
         vram_mtp_kv      = _mtp_draft_kv_mib(meta, context_window, bytes_pe_k, bytes_pe)
         vram_mtp_compute = _MTP_DRAFT_COMPUTE_MIB
+        vram_mtp_weights = _mtp_draft_weights_mib(model_path)
 
     ram_kv  = kv_total_mib - vram_kv
     ram_ssm = ssm_state_mib - vram_ssm
@@ -253,13 +275,15 @@ def estimate_memory(
         "vram_mmproj_compute":  vram_mmproj_compute,
         "vram_mtp_kv":      vram_mtp_kv,
         "vram_mtp_compute": vram_mtp_compute,
+        "vram_mtp_weights": vram_mtp_weights,
         "ram_weights":      ram_weights,
         "ram_kv":           ram_kv,
         "ram_ssm":          ram_ssm,
         "cache_ram":        cache_ram_mib,
         "moe_offload_mib":  moe_offload_mib,
         "vram_total":       (vram_weights + vram_kv + vram_compute + vram_ssm
-                             + vram_mmproj + vram_mtp_kv + vram_mtp_compute),
+                             + vram_mmproj + vram_mtp_kv + vram_mtp_compute
+                             + vram_mtp_weights),
         "ram_total":        ram_weights + ram_kv + ram_ssm,
         "vram_avail":       gpu_free_mib(),
         "vram_total_phys":  gpu_total_mib(),

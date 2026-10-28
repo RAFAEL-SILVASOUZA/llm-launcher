@@ -27,6 +27,7 @@ export function EstimatePanel({ estimate, loading }: Props) {
     { label: "mmproj",  value: e.vram_mmproj,         color: "bg-amber-500" },
     { label: "mtp kv",  value: e.vram_mtp_kv,         color: "bg-pink-500" },
     { label: "mtp cmp", value: e.vram_mtp_compute,    color: "bg-pink-700" },
+    { label: "mtp w",   value: e.vram_mtp_weights,    color: "bg-pink-400" },
   ];
   const ramSegments = [
     { label: "pesos", value: e.ram_weights, color: "bg-purple-500" },
@@ -66,8 +67,8 @@ export function EstimatePanel({ estimate, loading }: Props) {
           <DT label="VRAM compute"        v={e.vram_compute} />
           {e.vram_ssm > 0 && <DT label="VRAM ssm" v={e.vram_ssm} />}
           {e.vram_mmproj > 0 && <DT label="VRAM mmproj" v={e.vram_mmproj} />}
-          {(e.vram_mtp_kv + e.vram_mtp_compute) > 0 && (
-            <DT label="VRAM mtp-draft" v={e.vram_mtp_kv + e.vram_mtp_compute} />
+          {(e.vram_mtp_kv + e.vram_mtp_compute + e.vram_mtp_weights) > 0 && (
+            <DT label="VRAM mtp-draft" v={e.vram_mtp_kv + e.vram_mtp_compute + e.vram_mtp_weights} />
           )}
           {e.moe_offload_mib > 0 && (
             <DT label="MoE offload" v={e.moe_offload_mib} />

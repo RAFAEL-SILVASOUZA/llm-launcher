@@ -80,6 +80,8 @@ export type ModelInfo = {
   size_mib: number;
   is_thinking: boolean;
   is_mtp: boolean;
+  /** gguf da head MTP quando vem em pasta separada (`mtp-<quant>/`) — vira -md. */
+  mtp_draft: string | null;
   sampling: ModelSampling;
 };
 
@@ -145,6 +147,14 @@ export type LaunchConfig = {
   min_p?: number | null;
   repeat_penalty?: number | null;
   sampler_source?: SamplerSource | null;
+  // Sem controle na UI, só via JSON da config:
+  //   cors_origins     — undefined = "localhost" (o server reflete o Origin só
+  //                      quando é localhost); "*" volta ao default do llama.cpp,
+  //                      que é o que dispara o aviso de CORS aberto no boot.
+  //   image_min_tokens — undefined = decide pelo projector (1024 em Qwen-VL,
+  //                      nada no resto); 0 desliga a flag.
+  cors_origins?: string | null;
+  image_min_tokens?: number | null;
   // Multi-GPU (opcionais; null/undefined = default do llama.cpp = layer split)
   split_mode?: "none" | "layer" | "row" | null;
   tensor_split?: string | null;
@@ -174,6 +184,7 @@ export type Estimate = {
   vram_mmproj_compute: number;
   vram_mtp_kv: number;
   vram_mtp_compute: number;
+  vram_mtp_weights: number;
   ram_weights: number;
   ram_kv: number;
   ram_ssm: number;

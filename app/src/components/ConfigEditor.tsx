@@ -185,9 +185,19 @@ export function ConfigEditor({
   const isMoE      = meta?.is_moe ?? false;
   const isHybrid   = !!(meta && meta.ssm_state_per_layer_mib);
   const moeLayers  = meta?.moe_layers_count ?? 0;
-  const isMtpModel = useMemo(
-    () => !!cfg.model && /(?:^|[-_.])mtp(?:[-_.]|$)/i.test(cfg.model.split(/[\\/]/).join("/")),
-    [cfg.model],
+  // Quem decide é o backend (models_repo.is_mtp_model): além do tag no caminho,
+  // ele acha a head MTP publicada em pasta irmã `mtp-<quant>/`, que não deixa
+  // rastro no path do modelo. O regex fica só de fallback, se o modelo
+  // selecionado não estiver na lista carregada.
+  const isMtpModel = useMemo(() => {
+    if (!cfg.model) return false;
+    const known = models.find((m) => m.path === cfg.model);
+    if (known) return known.is_mtp;
+    return /(?:^|[-_.])mtp(?:[-_.]|$)/i.test(cfg.model.split(/[\\/]/).join("/"));
+  }, [cfg.model, models]);
+  const mtpDraft = useMemo(
+    () => models.find((m) => m.path === cfg.model)?.mtp_draft ?? null,
+    [cfg.model, models],
   );
   const backend = backends.find((b) => b.name === cfg.backend);
 
@@ -668,6 +678,11 @@ export function ConfigEditor({
                   onChange={(v) => setCfg((c) => ({ ...c, spec_draft_n_max: v as number }))}
                 />
               </Field>
+              {mtpDraft && (
+                <div className="text-[11px] text-ink-500 mt-1 truncate" title={mtpDraft}>
+                  head MTP em gguf separado — entra como -md {mtpDraft.split(/[\\/]/).pop()}
+                </div>
+              )}
             </Section>
           )}
 

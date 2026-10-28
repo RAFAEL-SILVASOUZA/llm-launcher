@@ -4,9 +4,15 @@ from pathlib import Path
 
 from . import sampling
 from .backends import backend_binary, backend_supports_flag, kv_unified_active
-from .constants import BACKENDS, CPU_THREADS_BATCH, CPU_THREADS_GEN
+from .constants import (
+    BACKENDS,
+    CPU_THREADS_BATCH,
+    CPU_THREADS_GEN,
+    DEFAULT_CORS_ORIGINS,
+    IMAGE_MIN_TOKENS_QWEN_VL,
+)
 from .defaults import REASONING_BUDGET_MESSAGE
-from .models_repo import is_mtp_model, make_alias
+from .models_repo import find_mtp_draft, is_mtp_model, is_qwen_vl_mmproj, make_alias
 
 
 class BackendBinaryMissing(Exception):
@@ -39,6 +45,60 @@ def _multi_gpu_flags(
     return out
 
 
+def _spec_mtp_flags(model_path: Path, spec_draft_n_max: int) -> str:
+    """Flags de speculative MTP. Duas embalagens da mesma feature:
+
+      • head EMBUTIDA no gguf do modelo (`Qwen3.6-27B-MTP-GGUF`) → só --spec-type;
+      • head em gguf SEPARADO, na pasta irmã `mtp-<quant>/` → precisa também do
+        -md apontando pro arquivo, senão o loader não acha a head e o
+        --spec-type draft-mtp sobe sem rascunhar nada.
+
+    -ngld fica de fora de propósito: o default do upstream é 'auto', que
+    acomoda o drafter na VRAM que sobrar em vez de forçar 99 e estourar.
+    """
+    out = f' --spec-type draft-mtp --spec-draft-n-max {spec_draft_n_max}'
+    draft = find_mtp_draft(model_path)
+    if draft is not None:
+        out += f' -md "{draft}"'
+    return out
+
+
+def _image_min_tokens(
+    mmproj:   Path | None,
+    backend:  str,
+    mode:     str = "server",
+    override: int | None = None,
+) -> int | None:
+    """Valor de --image-min-tokens, ou None quando a flag não deve entrar.
+
+    `override`: None = decide pelo projector (1024 só em Qwen-VL); 0 = desligado
+    (é o degrau que o auto-degrade usa se o build recusar a flag); >0 = valor
+    explícito da config.
+    """
+    if mmproj is None or override == 0:
+        return None
+    tokens = override
+    if tokens is None:
+        if not is_qwen_vl_mmproj(mmproj):
+            return None
+        tokens = IMAGE_MIN_TOKENS_QWEN_VL
+    if not backend_supports_flag("--image-min-tokens", backend, mode):
+        return None
+    return tokens
+
+
+def _cors_flags(cors_origins: str | None, backend: str) -> str:
+    """--cors-origins. Sem isso o server sobe com "*" e avisa que qualquer
+    origem pode chamar a API sem API key (ver DEFAULT_CORS_ORIGINS)."""
+    origins = (cors_origins or "").strip()
+    if not origins:
+        return ""
+    if not backend_supports_flag("--cors-origins", backend, "server"):
+        return ""
+    # Aspas: o valor pode ser "*" ou uma lista separada por vírgula.
+    return f' --cors-origins "{origins}"'
+
+
 def build_auto_server_command(
     model_path: Path,
     backend:    str,
@@ -46,14 +106,17 @@ def build_auto_server_command(
     verbose:    bool = False,
     host:       str = "0.0.0.0",
     port:       int = 1234,
+    cors_origins: str | None = DEFAULT_CORS_ORIGINS,
 ) -> str:
     """Comando MÍNIMO — o modo "llama.cpp decide" (cfg["llama_auto"]).
 
     Só entra o que identifica o modelo (-m/--mmproj/--alias) e o que serve o
-    HTTP (--jinja/--metrics/--host/--port). Nenhuma flag de tuning: contexto,
-    -ngl, KV, threads, batch, samplers, reasoning e speculative ficam nos
-    defaults do próprio llama.cpp, que decide tudo a partir do GGUF e da
-    máquina. É a saída de emergência pra quando o nosso palpite atrapalha.
+    HTTP (--jinja/--metrics/--host/--port/--cors-origins). Nenhuma flag de
+    tuning: contexto, -ngl, KV, threads, batch, samplers, reasoning e
+    speculative ficam nos defaults do próprio llama.cpp, que decide tudo a
+    partir do GGUF e da máquina. É a saída de emergência pra quando o nosso
+    palpite atrapalha. --cors-origins fica porque não é tuning: é a porta de
+    entrada HTTP, e o default "*" do llama.cpp abre a API pra qualquer site.
     """
     server_bin = backend_binary(backend, "server")
     if not server_bin.exists():
@@ -64,6 +127,7 @@ def build_auto_server_command(
         cmd += f' --mmproj "{mmproj}"'
     cmd += f' --alias "{make_alias(model_path)}"'
     cmd += f' --jinja --metrics --host {host} --port {port}'
+    cmd += _cors_flags(cors_origins, backend)
     if verbose:
         cmd += ' --verbose'
     return cmd
@@ -119,6 +183,8 @@ def build_server_command(
     host:             str = "0.0.0.0",
     port:             int = 1234,
     sampler:          dict | None = None,
+    cors_origins:     str | None = DEFAULT_CORS_ORIGINS,
+    image_min_tokens: int | None = None,
 ) -> str:
     alias = make_alias(model_path)
     server_bin = backend_binary(backend, "server")
@@ -128,6 +194,9 @@ def build_server_command(
     cmd = f'"{server_bin}" -m "{model_path}"'
     if mmproj:
         cmd += f' --mmproj "{mmproj}"'
+        img_tokens = _image_min_tokens(mmproj, backend, "server", image_min_tokens)
+        if img_tokens:
+            cmd += f' --image-min-tokens {img_tokens}'
 
     # -c é o contexto TOTAL, e o llama.cpp reparte entre os slots -np. Com -kvu
     # ele não reparte (n_ctx_seq = n_ctx): os slots dividem um pool só, e
@@ -190,11 +259,12 @@ def build_server_command(
         cmd += ' --mlock'
 
     if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
-        cmd += f' --spec-type draft-mtp --spec-draft-n-max {spec_draft_n_max}'
+        cmd += _spec_mtp_flags(model_path, spec_draft_n_max)
 
     cmd += f' --cache-ram {cache_ram}'
     cmd += f' --ctx-checkpoints {ctx_checkpoints}'
     cmd += f' --jinja --metrics --host {host} --port {port}'
+    cmd += _cors_flags(cors_origins, backend)
 
     if verbose:
         cmd += ' --verbose'
@@ -223,6 +293,7 @@ def build_cli_command(
     tensor_split:     str | None = None,
     main_gpu:         int | None = None,
     sampler:          dict | None = None,
+    image_min_tokens: int | None = None,
 ) -> str:
     cli_bin = backend_binary(backend, "cli")
     if not cli_bin.exists():
@@ -231,6 +302,9 @@ def build_cli_command(
     cmd = f'"{cli_bin}" -m "{model_path}"'
     if mmproj:
         cmd += f' --mmproj "{mmproj}"'
+        img_tokens = _image_min_tokens(mmproj, backend, "cli", image_min_tokens)
+        if img_tokens:
+            cmd += f' --image-min-tokens {img_tokens}'
 
     cmd += f' -c {context_window}'
     cmd += f' -ngl {gpu_layers}'
@@ -261,7 +335,7 @@ def build_cli_command(
         cmd += ' --mlock'
 
     if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
-        cmd += f' --spec-type draft-mtp --spec-draft-n-max {spec_draft_n_max}'
+        cmd += _spec_mtp_flags(model_path, spec_draft_n_max)
 
     cmd += ' --conversation'
     if verbose:
@@ -287,11 +361,17 @@ def _router_section_lines(cfg: dict) -> list[str]:
     def add(key: str, val) -> None:
         lines.append(f"{key} = {val}")
 
+    backend = cfg.get("backend", "turbo")
     model_path = Path(cfg["model"])
     add("model", str(model_path))
     mmproj = cfg.get("mmproj")
     if mmproj:
         add("mmproj", str(Path(mmproj)))
+        img_tokens = _image_min_tokens(
+            Path(mmproj), backend, "server", cfg.get("image_min_tokens")
+        )
+        if img_tokens:
+            add("image-min-tokens", img_tokens)
 
     # Modo auto (checkbox "llama.cpp decide"): a seção fica só com o modelo —
     # o filho sobe com os defaults do llama.cpp, igual ao launch único.
@@ -304,7 +384,7 @@ def _router_section_lines(cfg: dict) -> list[str]:
     # ctx-size/kv-unified: mesma regra do build_server_command — com pool
     # compartilhado o ctx não multiplica pelos slots.
     parallel = cfg.get("parallel_slots", 1)
-    unified  = kv_unified_active(cfg.get("backend", "turbo"), cfg.get("kv_unified", True))
+    unified  = kv_unified_active(backend, cfg.get("kv_unified", True))
     add("ctx-size", cfg["context_window"] if unified else cfg["context_window"] * parallel)
     add("n-gpu-layers", cfg.get("gpu_layers", 99))
 
@@ -348,7 +428,7 @@ def _router_section_lines(cfg: dict) -> list[str]:
             add("reasoning", "on")
             add("reasoning-budget", reasoning_budget)
             if reasoning_budget > 0 and backend_supports_flag(
-                "--reasoning-budget-message", cfg.get("backend", "turbo"), "server"
+                "--reasoning-budget-message", backend, "server"
             ):
                 # Valor INI é a linha crua — sem aspas de shell.
                 add("reasoning-budget-message", REASONING_BUDGET_MESSAGE)
@@ -360,10 +440,12 @@ def _router_section_lines(cfg: dict) -> list[str]:
     if cfg.get("mlock", True):
         add("mlock", "true")
 
-    backend = cfg.get("backend", "turbo")
     if BACKENDS[backend]["supports_spec_mtp"] and is_mtp_model(model_path):
         add("spec-type", "draft-mtp")
         add("spec-draft-n-max", cfg.get("spec_draft_n_max", 2))
+        draft = find_mtp_draft(model_path)
+        if draft is not None:
+            add("spec-draft-model", str(draft))
 
     add("cache-ram", cfg.get("cache_ram", 8_192))
     add("ctx-checkpoints", cfg.get("ctx_checkpoints", 8))
@@ -425,15 +507,28 @@ def build_router_command(
     preset_path: Path,
     host: str = "0.0.0.0",
     port: int = 1234,
+    cors_origins: str | None = DEFAULT_CORS_ORIGINS,
 ) -> str:
     """Comando do router: sem -m (é isso que ativa o modo router). Flags de
     modelo ficam TODAS no preset — argumento de linha de comando do router tem
-    precedência sobre o INI e vazaria pra todas as instâncias filhas."""
+    precedência sobre o INI e vazaria pra todas as instâncias filhas.
+
+    --cors-origins é a exceção proposital: o vazamento é justamente o que se
+    quer (o router é quem atende a porta pública, e os filhos herdam a mesma
+    política de origem)."""
     server_bin = router_binary_for(cfgs)
+    backend = cfgs[0].get("backend", "turbo") if cfgs else "turbo"
+    # A política é do processo, não do modelo: a primeira config que definir
+    # cors_origins manda (o router serve todas as seções na mesma porta).
+    for cfg in cfgs:
+        if cfg.get("cors_origins") is not None:
+            cors_origins = cfg["cors_origins"]
+            break
     cmd = f'"{server_bin}"'
     cmd += f' --models-preset "{preset_path}"'
     cmd += f' --models-max {len(cfgs)}'
     cmd += f' --host {host} --port {port}'
+    cmd += _cors_flags(cors_origins, backend)
     return cmd
 
 
@@ -443,13 +538,21 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
     mmproj = Path(mmproj_str) if mmproj_str else None
     model_path = Path(cfg["model"])
 
+    # Nenhuma das duas tem controle na UI: cors_origins é a válvula pra quando um
+    # front fora de localhost precisar chamar a API (ver DEFAULT_CORS_ORIGINS) e
+    # image_min_tokens é o degrau do auto-degrade (0 = não emite a flag).
+    cors_origins     = cfg.get("cors_origins", DEFAULT_CORS_ORIGINS)
+    image_min_tokens = cfg.get("image_min_tokens")
+
     # Modo auto: nenhuma outra chave da config vira flag (elas continuam
     # salvas — desmarcar o checkbox devolve a config completa intacta).
     if cfg.get("llama_auto", False):
         backend = cfg.get("backend", "turbo")
         verbose = cfg.get("verbose", False)
         if mode == "server":
-            return build_auto_server_command(model_path, backend, mmproj, verbose)
+            return build_auto_server_command(
+                model_path, backend, mmproj, verbose, cors_origins=cors_origins
+            )
         return build_auto_cli_command(model_path, backend, mmproj, verbose)
 
     sampler = sampling.resolve(model_path, cfg)
@@ -481,6 +584,8 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
             tensor_split=cfg.get("tensor_split"),
             main_gpu=cfg.get("main_gpu"),
             sampler=sampler,
+            cors_origins=cors_origins,
+            image_min_tokens=image_min_tokens,
         )
     return build_cli_command(
         model_path=model_path,
@@ -504,4 +609,5 @@ def build_command_from_cfg(cfg: dict, mode: str = "server") -> str:
         tensor_split=cfg.get("tensor_split"),
         main_gpu=cfg.get("main_gpu"),
         sampler=sampler,
+        image_min_tokens=image_min_tokens,
     )

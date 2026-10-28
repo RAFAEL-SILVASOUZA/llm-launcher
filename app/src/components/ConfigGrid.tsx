@@ -652,8 +652,8 @@ function ExpandedPanel({ cfg, est }: { cfg: LaunchConfig; est: Estimate | null }
             <DT label="  ↳ compute"    v={est.vram_compute} />
             {est.vram_ssm > 0 && <DT label="  ↳ ssm" v={est.vram_ssm} />}
             {est.vram_mmproj > 0 && <DT label="  ↳ mmproj" v={est.vram_mmproj} />}
-            {(est.vram_mtp_kv + est.vram_mtp_compute) > 0 && (
-              <DT label="  ↳ mtp" v={est.vram_mtp_kv + est.vram_mtp_compute} />
+            {(est.vram_mtp_kv + est.vram_mtp_compute + est.vram_mtp_weights) > 0 && (
+              <DT label="  ↳ mtp" v={est.vram_mtp_kv + est.vram_mtp_compute + est.vram_mtp_weights} />
             )}
             <DT label="RAM total"      v={est.ram_total} hi />
             {est.moe_offload_mib > 0 && <DT label="MoE offload" v={est.moe_offload_mib} />}

@@ -9,6 +9,7 @@ import re
 
 from .backends import kv_unified_active, next_kv_tier, remap_kv_for_backend
 from .constants import (
+    DEFAULT_CORS_ORIGINS,
     KV_REJECTED_PATTERNS,
     MMPROJ_ERROR_PATTERNS,
     MODEL_CORRUPTED_PATTERNS,
@@ -97,6 +98,14 @@ def next_degrade(cfg: dict, failure: str, error_excerpt: str) -> tuple[dict | No
         if flag == "--chat-template-kwargs" and cfg.get("preserve_thinking"):
             cfg["preserve_thinking"] = False
             return cfg, "removido --chat-template-kwargs (build não suporta)"
+        if flag == "--cors-origins" and cfg.get("cors_origins", DEFAULT_CORS_ORIGINS):
+            # Volta pro default "*" do llama.cpp: o server sobe (só com o aviso
+            # de CORS aberto no log), que é melhor que não subir.
+            cfg["cors_origins"] = ""
+            return cfg, "removido --cors-origins (build não suporta) — CORS volta a ser '*'"
+        if flag == "--image-min-tokens" and cfg.get("image_min_tokens") != 0:
+            cfg["image_min_tokens"] = 0
+            return cfg, "removido --image-min-tokens (build não suporta)"
         # Sem -kvu o builder volta a multiplicar o -c pelos slots, senão o
         # llama.cpp repartiria o contexto e cortaria a janela em silêncio. O
         # preço é KV × slots — se não couber, a escada continua daqui.
